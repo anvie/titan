@@ -35,4 +35,7 @@ public class LimitedSelector implements KeySelector {
         else return false;
     }
 
+    public int getLimit(){
+        return this.limit;
+    }
 }

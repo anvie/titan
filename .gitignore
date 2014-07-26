@@ -39,3 +39,5 @@ titan-*/pom.xml.versionsBackup
 /debian/
 /redhat/
 /pkgcommon/
+titan.ipr
+titan.iws

@@ -91,6 +91,7 @@
         <module>titan-core</module>
         <module>titan-test</module>
         <module>titan-berkeleyje</module>
+        <module>titan-hyperdex</module>
         <module>titan-cassandra</module>
         <module>titan-hbase</module>
         <module>titan-es</module>
@@ -184,6 +185,7 @@
                     <artifactId>maven-surefire-plugin</artifactId>
                     <version>2.15</version>
                     <configuration>
+                        <redirectTestOutputToFile>true</redirectTestOutputToFile>
                         <argLine>${default.test.jvm.opts}</argLine>
                         <runOrder>alphabetical</runOrder>
                         <failIfNoTests>false</failIfNoTests>
