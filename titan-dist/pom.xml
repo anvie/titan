@@ -326,6 +326,8 @@
                 </executions>
             </plugin>
 
+
+            <!--
             <plugin>
                 <artifactId>maven-deploy-plugin</artifactId>
                 <executions>
@@ -335,6 +337,7 @@
                     </execution>
                 </executions>
             </plugin>
+            -->
 
             <plugin>
                 <groupId>org.codehaus.mojo</groupId>

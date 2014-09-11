@@ -14,20 +14,7 @@
         <top.level.basedir>${basedir}/..</top.level.basedir>
     </properties>
 
-    <repositories>
-        <!-- Access Sonatype OSS Snapshots for Furnace artifacts. This can 
-            go away when Furnace is released to Central. -->
-        <repository>
-            <id>sonatype-oss-snapshots</id>
-            <url>https://oss.sonatype.org/content/repositories/snapshots</url>
-            <releases>
-                <enabled>false</enabled>
-            </releases>
-            <snapshots>
-                <enabled>true</enabled>
-            </snapshots>
-        </repository>
-    </repositories>
+
 
     <dependencies>
         <dependency>
