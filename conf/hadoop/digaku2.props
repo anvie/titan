@@ -1,0 +1,19 @@
+# input graph parameters
+titan.hadoop.input.format=com.thinkaurelius.titan.hadoop.formats.cassandra.TitanCassandraInputFormat
+titan.hadoop.input.conf.storage.backend=cassandrathrift
+titan.hadoop.input.conf.storage.hostname=localhost
+titan.hadoop.input.conf.storage.port=9160
+titan.hadoop.input.conf.storage.cassandra.keyspace=digaku
+cassandra.input.partitioner.class=org.apache.cassandra.dht.Murmur3Partitioner
+cassandra.input.split.size=512
+cassandra.thrift.framed.size_mb=128
+cassandra.thrift.message.max_size_mb=100
+
+# output data (graph or statistic) parameters
+titan.hadoop.sideeffect.format=org.apache.hadoop.mapreduce.lib.output.TextOutputFormat
+#titan.hadoop.output.format=com.thinkaurelius.titan.hadoop.formats.graphson.GraphSONOutputFormat
+titan.hadoop.output.format=com.thinkaurelius.titan.hadoop.formats.noop.NoOpOutputFormat
+
+titan.hadoop.jobdir.location=jobs
+titan.hadoop.jobdir.overwrite=true
+
