@@ -1325,8 +1325,9 @@ public class GraphDatabaseConfiguration {
             } else {
                 String version = globalWrite.get(INITIAL_TITAN_VERSION);
                 Preconditions.checkArgument(version!=null,"Titan version has not been initialized");
-                if (!TitanConstants.VERSION.equals(version) && !TitanConstants.COMPATIBLE_VERSIONS.contains(version)) {
-                    throw new TitanException("StorageBackend version is incompatible with current Titan version: " + version + " vs. " + TitanConstants.VERSION);
+                if (!(TitanConstants.VERSION.equals(version) || TitanConstants.VERSION.equals(version + "-SNAPSHOT")) && !TitanConstants.COMPATIBLE_VERSIONS.contains(version)) {
+                    throw new TitanException("StorageBackend version " + version + " is incompatible with current Titan version: " + TitanConstants.VERSION + 
+                        ", compatible versions are: " + Joiner.on(", ").join(TitanConstants.COMPATIBLE_VERSIONS));
                 }
 
                 final boolean managedOverridesAllowed;
