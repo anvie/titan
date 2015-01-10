@@ -84,9 +84,7 @@ import java.util.Set;
 import java.util.concurrent.Callable;
 import java.util.concurrent.TimeUnit;
 
-import static com.thinkaurelius.titan.graphdb.configuration.GraphDatabaseConfiguration.REGISTRATION_NS;
-import static com.thinkaurelius.titan.graphdb.configuration.GraphDatabaseConfiguration.REGISTRATION_TIME;
-import static com.thinkaurelius.titan.graphdb.configuration.GraphDatabaseConfiguration.ROOT_NS;
+import static com.thinkaurelius.titan.graphdb.configuration.GraphDatabaseConfiguration.*;
 import static com.thinkaurelius.titan.graphdb.database.management.RelationTypeIndexWrapper.RELATION_INDEX_SEPARATOR;
 
 /**
@@ -95,8 +93,10 @@ import static com.thinkaurelius.titan.graphdb.database.management.RelationTypeIn
  */
 public class ManagementSystem implements TitanManagement {
 
-    private static final Logger slf =
+    private static final Logger LOGGER =
             LoggerFactory.getLogger(ManagementSystem.class);
+
+    private static final String CURRENT_INSTANCE_SUFFIX = "(current)";
 
     private final StandardTitanGraph graph;
     private final Log sysLog;
@@ -147,7 +147,7 @@ public class ManagementSystem implements TitanManagement {
             Preconditions.checkArgument(option.getType()!= ConfigOption.Type.LOCAL,"Cannot change the local configuration option: %s",option);
             if (option.getType() == ConfigOption.Type.GLOBAL_OFFLINE) {
                 //Verify that there no other open Titan graph instance and no open transactions
-                Set<String> openInstances = getOpenInstances();
+                Set<String> openInstances = getOpenInstancesInternal();
                 assert openInstances.size()>0;
                 Preconditions.checkArgument(openInstances.size()<2,"Cannot change offline config option [%s] since multiple instances are currently open: %s",option,openInstances);
                 Preconditions.checkArgument(openInstances.contains(graph.getConfiguration().getUniqueGraphId()),
@@ -160,15 +160,26 @@ public class ManagementSystem implements TitanManagement {
         }
     };
 
+    public Set<String> getOpenInstancesInternal() {
+        Set<String> openInstances = Sets.newHashSet(modifyConfig.getContainedNamespaces(REGISTRATION_NS));
+        LOGGER.debug("Open instances: {}", openInstances);
+        return openInstances;
+    }
+
     @Override
     public Set<String> getOpenInstances() {
-        Set<String> openInstances = Sets.newHashSet(modifyConfig.getContainedNamespaces(REGISTRATION_NS));
-        slf.debug("Open instances: {}", openInstances);
+        Set<String> openInstances = getOpenInstancesInternal();
+        String uid = graph.getConfiguration().getUniqueGraphId();
+        Preconditions.checkArgument(openInstances.contains(uid),"Current instance [%s] not listed as an open instance: %s",uid,openInstances);
+        openInstances.remove(uid);
+        openInstances.add(uid+CURRENT_INSTANCE_SUFFIX);
         return openInstances;
     }
 
     @Override
     public void forceCloseInstance(String instanceId) {
+        Preconditions.checkArgument(!graph.getConfiguration().getUniqueGraphId().equals(instanceId),
+                "Cannot force close this current instance [%s]. Properly shut down the graph instead.",instanceId);
         Preconditions.checkArgument(modifyConfig.has(REGISTRATION_TIME,instanceId),"Instance [%s] is not currently open",instanceId);
         Timepoint registrationTime = modifyConfig.get(REGISTRATION_TIME,instanceId);
         Preconditions.checkArgument(registrationTime.compareTo(txStartTime)<0,"The to-be-closed instance [%s] was started after this transaction" +
@@ -197,7 +208,7 @@ public class ManagementSystem implements TitanManagement {
 
         //Communicate schema changes
         if (!updatedTypes.isEmpty()) {
-            mgmtLogger.sendCacheEviction(updatedTypes,updatedTypeTriggers,getOpenInstances());
+            mgmtLogger.sendCacheEviction(updatedTypes,updatedTypeTriggers,getOpenInstancesInternal());
             for (TitanSchemaVertex schemaVertex : updatedTypes) {
                 schemaCache.expireSchemaElement(schemaVertex.getLongId());
             }
@@ -433,7 +444,7 @@ public class ManagementSystem implements TitanManagement {
             idx  = mgmt.getGraphIndex(indexName);
             for (PropertyKey pk : idx.getFieldKeys()) {
                 SchemaStatus s = idx.getIndexStatus(pk);
-                slf.debug("Key {} has status {}", pk, s);
+                LOGGER.debug("Key {} has status {}", pk, s);
                 if (!status.equals(s))
                     notConverged.put(pk, s);
                 else
@@ -448,14 +459,14 @@ public class ManagementSystem implements TitanManagement {
             String waitingOn = Joiner.on(",").withKeyValueSeparator("=").join(notConverged);
             mgmt.rollback();
             if (!notConverged.isEmpty()) {
-                slf.info("Some key(s) on index {} do not currently have status {}: ", indexName, status, waitingOn);
+                LOGGER.info("Some key(s) on index {} do not currently have status {}: ", indexName, status, waitingOn);
             } else {
-                slf.info("All {} key(s) on index {} have status {}", converged.size(), indexName, status);
+                LOGGER.info("All {} key(s) on index {} have status {}", converged.size(), indexName, status);
                 return true;
             }
             timedOut = timeout <= t.elapsed().getLength(timeoutUnit);
             if (timedOut) {
-                slf.info("Timed out ({} {}) while waiting for index {} to converge on status {}",
+                LOGGER.info("Timed out ({} {}) while waiting for index {} to converge on status {}",
                         timeout, timeoutUnit, indexName, status);
                 return false;
             }
@@ -481,14 +492,14 @@ public class ManagementSystem implements TitanManagement {
         def.setValue(TypeDefinitionCategory.INDEXSTORE_NAME,indexName);
         def.setValue(TypeDefinitionCategory.INDEX_CARDINALITY, Cardinality.LIST);
         def.setValue(TypeDefinitionCategory.STATUS,SchemaStatus.ENABLED);
-        TitanSchemaVertex v = transaction.makeSchemaVertex(TitanSchemaCategory.GRAPHINDEX,indexName,def);
+        TitanSchemaVertex indexVertex = transaction.makeSchemaVertex(TitanSchemaCategory.GRAPHINDEX,indexName,def);
 
         Preconditions.checkArgument(constraint==null || (elementCategory.isValidConstraint(constraint) && constraint instanceof TitanSchemaVertex));
         if (constraint!=null) {
-            addSchemaEdge(v,(TitanSchemaVertex)constraint,TypeDefinitionCategory.INDEX_SCHEMA_CONSTRAINT,null);
+            addSchemaEdge(indexVertex,(TitanSchemaVertex)constraint,TypeDefinitionCategory.INDEX_SCHEMA_CONSTRAINT,null);
         }
-
-        return new TitanGraphIndexWrapper(v.asIndexType());
+        updateSchemaVertex(indexVertex);
+        return new TitanGraphIndexWrapper(indexVertex.asIndexType());
     }
 
     @Override
@@ -507,10 +518,17 @@ public class ManagementSystem implements TitanManagement {
         for (IndexField field : indexType.getFieldKeys())
             Preconditions.checkArgument(!field.getFieldKey().equals(key),"Key [%s] has already been added to index %s",key.getName(),index.getName());
 
-        Parameter[] extendedParas = new Parameter[parameters.length+1];
+        //Assemble parameters
+        boolean addMappingParameter = !ParameterType.MAPPED_NAME.hasParameter(parameters);
+        Parameter[] extendedParas = new Parameter[parameters.length+1+(addMappingParameter?1:0)];
         System.arraycopy(parameters,0,extendedParas,0,parameters.length);
-        extendedParas[parameters.length]= ParameterType.STATUS.getParameter(key.isNew()?SchemaStatus.ENABLED:SchemaStatus.INSTALLED);
+        int arrPosition = parameters.length;
+        if (addMappingParameter) extendedParas[arrPosition++] = ParameterType.MAPPED_NAME.getParameter(
+                graph.getIndexSerializer().getDefaultFieldName(key,parameters,indexType.getBackingIndexName()));
+        extendedParas[arrPosition++] = ParameterType.STATUS.getParameter(key.isNew()?SchemaStatus.ENABLED:SchemaStatus.INSTALLED);
+
         addSchemaEdge(indexVertex, key, TypeDefinitionCategory.INDEX_FIELD, extendedParas);
+        updateSchemaVertex(indexVertex);
         indexType.resetCache();
         try {
             IndexSerializer.register((MixedIndexType) indexType,key,transaction.getTxHandle());
@@ -519,7 +537,6 @@ public class ManagementSystem implements TitanManagement {
         }
         if (!indexVertex.isNew()) updatedTypes.add(indexVertex);
         if (!key.isNew()) updateIndex(index, SchemaAction.REGISTER_INDEX);
-        //TODO: it is possible to have a race condition here if two threads add the same field at the same time
     }
 
     private TitanGraphIndex createCompositeIndex(String indexName, ElementCategory elementCategory, boolean unique, TitanSchemaType constraint, PropertyKey... keys) {
@@ -556,7 +573,7 @@ public class ManagementSystem implements TitanManagement {
         if (constraint!=null) {
             addSchemaEdge(indexVertex,(TitanSchemaVertex)constraint,TypeDefinitionCategory.INDEX_SCHEMA_CONSTRAINT,null);
         }
-
+        updateSchemaVertex(indexVertex);
         TitanGraphIndexWrapper index = new TitanGraphIndexWrapper(indexVertex.asIndexType());
         if (!oneNewKey) updateIndex(index,SchemaAction.REGISTER_INDEX);
         return index;
@@ -781,6 +798,8 @@ public class ManagementSystem implements TitanManagement {
     private void setStatus(TitanSchemaVertex vertex, SchemaStatus status, Set<PropertyKeyVertex> keys) {
         if (keys.isEmpty()) setStatusVertex(vertex,status);
         else setStatusEdges(vertex,status,keys);
+        vertex.resetCache();
+        updateSchemaVertex(vertex);
     }
 
     private void setStatusVertex(TitanSchemaVertex vertex, SchemaStatus status) {
@@ -796,8 +815,6 @@ public class ManagementSystem implements TitanManagement {
         //Add new status
         TitanProperty p = transaction.addProperty(vertex, BaseKey.SchemaDefinitionProperty, status);
         p.setProperty(BaseKey.SchemaDefinitionDesc,TypeDefinitionDescription.of(TypeDefinitionCategory.STATUS));
-
-        vertex.resetCache();
     }
 
     private void setStatusEdges(TitanSchemaVertex vertex, SchemaStatus status, Set<PropertyKeyVertex> keys) {
@@ -818,7 +835,6 @@ public class ManagementSystem implements TitanManagement {
         }
 
         for (PropertyKeyVertex prop : keys) prop.resetCache();
-        vertex.resetCache();
     }
 
 
@@ -844,6 +860,7 @@ public class ManagementSystem implements TitanManagement {
         }
 
         transaction.addProperty(schemaVertex, BaseKey.SchemaName, schemaCategory.getSchemaName(newName));
+        updateSchemaVertex(schemaVertex);
         schemaVertex.resetCache();
         updatedTypes.add(schemaVertex);
     }
@@ -866,6 +883,10 @@ public class ManagementSystem implements TitanManagement {
             return (TitanSchemaVertex)base;
         }
         throw new IllegalArgumentException("Invalid schema element provided: "+element);
+    }
+
+    private void updateSchemaVertex(TitanSchemaVertex schemaVertex) {
+        transaction.updateSchemaVertex(schemaVertex);
     }
 
     /* --------------
@@ -986,6 +1007,7 @@ public class ManagementSystem implements TitanManagement {
         def.setValue(cat, value);
         TitanSchemaVertex cVertex = transaction.makeSchemaVertex(TitanSchemaCategory.TYPE_MODIFIER, null, def);
         addSchemaEdge(typeVertex, cVertex, TypeDefinitionCategory.TYPE_MODIFIER, null);
+        updateSchemaVertex(typeVertex);
         updatedTypes.add(typeVertex);
     }
 
@@ -1002,8 +1024,28 @@ public class ManagementSystem implements TitanManagement {
     }
 
     @Override
+    public boolean containsPropertyKey(String name) {
+        return transaction.containsPropertyKey(name);
+    }
+
+    @Override
     public PropertyKey getPropertyKey(String name) {
         return transaction.getPropertyKey(name);
+    }
+
+    @Override
+    public boolean containsEdgeLabel(String name) {
+        return transaction.containsEdgeLabel(name);
+    }
+
+    @Override
+    public EdgeLabel getOrCreateEdgeLabel(String name) {
+        return transaction.getOrCreateEdgeLabel(name);
+    }
+
+    @Override
+    public PropertyKey getOrCreatePropertyKey(String name) {
+        return transaction.getOrCreatePropertyKey(name);
     }
 
     @Override

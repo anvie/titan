@@ -38,7 +38,6 @@ import org.elasticsearch.action.update.UpdateRequestBuilder;
 import org.elasticsearch.client.Client;
 import org.elasticsearch.client.transport.TransportClient;
 import org.elasticsearch.common.settings.ImmutableSettings;
-import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.transport.InetSocketTransportAddress;
 import org.elasticsearch.common.unit.DistanceUnit;
 import org.elasticsearch.common.xcontent.XContentBuilder;
@@ -71,6 +70,7 @@ public class ElasticSearchIndex implements IndexProvider {
     private static final Logger log = LoggerFactory.getLogger(ElasticSearchIndex.class);
 
     private static final String TTL_FIELD = "_ttl";
+    private static final String STRING_MAPPING_SUFFIX = "$STRING";
 
     public static final ImmutableList<String> DATA_SUBDIRS = ImmutableList.of("data", "work", "logs");
 
@@ -138,28 +138,23 @@ public class ElasticSearchIndex implements IndexProvider {
     public static final ConfigNamespace ES_EXTRAS_NS =
             new ConfigNamespace(ELASTICSEARCH_NS, "ext", "Overrides for arbitrary elasticsearch.yaml settings", true);
 
-    private static final IndexFeatures ES_FEATURES = new IndexFeatures.Builder().supportsDocumentTTL().build();
-//
-//    public static final String MAX_RESULT_SET_SIZE_KEY = "max-result-set-size";
-//    public static final int MAX_RESULT_SET_SIZE_DEFAULT = 100000;
+    public static final ConfigNamespace ES_CREATE_NS =
+            new ConfigNamespace(ELASTICSEARCH_NS, "create", "Settings related to index creation");
 
-//    public static final String CLIENT_ONLY_KEY = "client-only";
-//    public static final boolean CLIENT_ONLY_DEFAULT = true;
-//    public static final String CLUSTER_NAME_KEY = "cluster-name";
-//    public static final String CLUSTER_NAME_DEFAULT = "elasticsearch";
-//    public static final String INDEX_NAME_KEY = "index-name";
-//    public static final String INDEX_NAME_DEFAULT = "titan";
+    public static final ConfigOption<Long> CREATE_SLEEP =
+            new ConfigOption<Long>(ES_CREATE_NS, "sleep",
+            "How long to sleep, in milliseconds, between the successful completion of a (blocking) index " +
+            "creation request and the first use of that index.  This only applies when creating an index in ES, " +
+            "which typically only happens the first time Titan is started on top of ES. If the index Titan is " +
+            "configured to use already exists, then this setting has no effect.", ConfigOption.Type.MASKABLE, 200L);
 
-//    public static final String LOCAL_MODE_KEY = "local-mode";
-//    public static final boolean LOCAL_MODE_DEFAULT = false;
-//    public static final String CLIENT_SNIFF_KEY = "sniff";
-//    public static final boolean CLIENT_SNIFF_DEFAULT = true;
+    public static final ConfigNamespace ES_CREATE_EXTRAS_NS =
+            new ConfigNamespace(ES_CREATE_NS, "ext", "Overrides for arbitrary settings applied at index creation", true);
 
-    //    public static final String HOST_NAMES_KEY = "hosts";
+    private static final IndexFeatures ES_FEATURES = new IndexFeatures.Builder().supportsDocumentTTL()
+            .setDefaultStringMapping(Mapping.TEXT).supportedStringMappings(Mapping.TEXT, Mapping.TEXTSTRING, Mapping.STRING).build();
+
     public static final int HOST_PORT_DEFAULT = 9300;
-
-//    public static final String ES_YML_KEY = "config-file";
-
 
     private final Node node;
     private final Client client;
@@ -186,12 +181,37 @@ public class ElasticSearchIndex implements IndexProvider {
         client.admin().cluster().prepareHealth().setTimeout(config.get(HEALTH_REQUEST_TIMEOUT))
                 .setWaitForYellowStatus().execute().actionGet();
 
+        checkForOrCreateIndex(config);
+    }
+
+    /**
+     * If ES already contains this instance's target index, then do nothing.
+     * Otherwise, create the index, then wait {@link #CREATE_SLEEP}.
+     * <p>
+     * The {@code client} field must point to a live, connected client.
+     * The {@code indexName} field must be non-null and point to the name
+     * of the index to check for existence or create.
+     *
+     * @param config the config for this ElasticSearchIndex
+     * @throws java.lang.IllegalArgumentException if the index could not be created
+     */
+    private void checkForOrCreateIndex(Configuration config) {
+        Preconditions.checkState(null != client);
+
         //Create index if it does not already exist
         IndicesExistsResponse response = client.admin().indices().exists(new IndicesExistsRequest(indexName)).actionGet();
         if (!response.isExists()) {
-            CreateIndexResponse create = client.admin().indices().prepareCreate(indexName).execute().actionGet();
+
+            ImmutableSettings.Builder settings = ImmutableSettings.settingsBuilder();
+
+            ElasticSearchSetup.applySettingsFromTitanConf(settings, config, ES_CREATE_EXTRAS_NS);
+
+            CreateIndexResponse create = client.admin().indices().prepareCreate(indexName)
+                    .setSettings(settings.build()).execute().actionGet();
             try {
-                Thread.sleep(200);
+                final long sleep = config.get(CREATE_SLEEP);
+                log.debug("Sleeping {} ms after {} index creation returned from actionGet()", sleep, indexName);
+                Thread.sleep(sleep);
             } catch (InterruptedException e) {
                 throw new TitanException("Interrupted while waiting for index to settle in", e);
             }
@@ -330,6 +350,10 @@ public class ElasticSearchIndex implements IndexProvider {
         }
     }
 
+    private static String getDualMappingName(String key) {
+        return key + STRING_MAPPING_SUFFIX;
+    }
+
     @Override
     public void register(String store, String key, KeyInformation information, BaseTransaction tx) throws BackendException {
         XContentBuilder mapping;
@@ -342,17 +366,31 @@ public class ElasticSearchIndex implements IndexProvider {
             mapping = XContentFactory.jsonBuilder().
                     startObject().
                     startObject(store).
-                    field("_ttl", new HashMap<String, Object>() {{
+                    field(TTL_FIELD, new HashMap<String, Object>() {{
                         put("enabled", true);
                     }}).
                     startObject("properties").
                     startObject(key);
 
             if (AttributeUtil.isString(dataType)) {
-                log.debug("Registering string type for {}", key);
+                if (map==Mapping.DEFAULT) map=Mapping.TEXT;
+                log.debug("Registering string type for {} with mapping {}", key, map);
                 mapping.field("type", "string");
-                if (map==Mapping.STRING)
-                    mapping.field("index","not_analyzed");
+                switch (map) {
+                    case STRING:
+                        mapping.field("index","not_analyzed");
+                        break;
+                    case TEXT:
+                        //default, do nothing
+                    case TEXTSTRING:
+                        mapping.endObject();
+                        //add string mapping
+                        mapping.startObject(getDualMappingName(key));
+                        mapping.field("type", "string");
+                        mapping.field("index","not_analyzed");
+                        break;
+                    default: throw new AssertionError("Unexpected mapping: "+map);
+                }
             } else if (dataType == Float.class) {
                 log.debug("Registering float type for {}", key);
                 mapping.field("type", "float");
@@ -393,7 +431,18 @@ public class ElasticSearchIndex implements IndexProvider {
         }
     }
 
-    public XContentBuilder getContent(final List<IndexEntry> additions, int ttl) throws BackendException {
+    private static Mapping getStringMapping(KeyInformation information) {
+        assert AttributeUtil.isString(information.getDataType());
+        Mapping map = Mapping.getMapping(information);
+        if (map==Mapping.DEFAULT) map = Mapping.TEXT;
+        return map;
+    }
+
+    private static boolean hasDualStringMapping(KeyInformation information) {
+        return AttributeUtil.isString(information.getDataType()) && getStringMapping(information)==Mapping.TEXTSTRING;
+    }
+
+    public XContentBuilder getContent(final List<IndexEntry> additions, KeyInformation.StoreRetriever informations, int ttl) throws BackendException {
         Preconditions.checkArgument(ttl>=0);
         try {
             XContentBuilder builder = XContentFactory.jsonBuilder().startObject();
@@ -415,6 +464,9 @@ public class ElasticSearchIndex implements IndexProvider {
                     }
                 } else if (AttributeUtil.isString(add.value)) {
                     builder.field(add.field, (String) add.value);
+                    if (hasDualStringMapping(informations.get(add.field))) {
+                        builder.field(getDualMappingName(add.field), (String) add.value);
+                    }
                 } else if (add.value instanceof Geoshape) {
                     Geoshape shape = (Geoshape) add.value;
                     if (shape.getType() == Geoshape.Type.POINT) {
@@ -474,6 +526,9 @@ public class ElasticSearchIndex implements IndexProvider {
                             StringBuilder script = new StringBuilder();
                             for (String key : Iterables.transform(mutation.getDeletions(),IndexMutation.ENTRY2FIELD_FCT)) {
                                 script.append("ctx._source.remove(\"" + key + "\"); ");
+                                if (hasDualStringMapping(informations.get(storename,key))) {
+                                    script.append("ctx._source.remove(\"" + getDualMappingName(key) + "\"); ");
+                                }
                                 log.trace("Deleting individual field [{}] for document {}", key, docid);
                             }
                             brb.add(client.prepareUpdate(indexName, storename, docid).setScript(script.toString()));
@@ -483,14 +538,16 @@ public class ElasticSearchIndex implements IndexProvider {
                         bulkrequests++;
                     }
                     if (mutation.hasAdditions()) {
-                        int ttl = determineTTL(mutation.getAdditions());
+                        int ttl = mutation.determineTTL();
+
                         if (mutation.isNew()) { //Index
                             log.trace("Adding entire document {}", docid);
-                            brb.add(new IndexRequest(indexName, storename, docid).source(getContent(mutation.getAdditions(),ttl)));
+                            brb.add(new IndexRequest(indexName, storename, docid)
+                                    .source(getContent(mutation.getAdditions(), informations.get(storename), ttl)));
                         } else {
                             Preconditions.checkArgument(ttl==0,"Elasticsearch only supports TTL on new documents [%s]",docid);
                             boolean needUpsert = !mutation.hasDeletions();
-                            XContentBuilder builder = getContent(mutation.getAdditions(),ttl);
+                            XContentBuilder builder = getContent(mutation.getAdditions(),informations.get(storename),ttl);
                             UpdateRequestBuilder update = client.prepareUpdate(indexName, storename, docid).setDoc(builder);
                             if (needUpsert) update.setUpsert(builder);
                             log.trace("Updating document {} with upsert {}", docid, needUpsert);
@@ -507,25 +564,6 @@ public class ElasticSearchIndex implements IndexProvider {
         } catch (Exception e) {
             throw convert(e);
         }
-    }
-
-    //Compute TTL and ensure that all index entries have the same TTL (if any)
-    private static int determineTTL(List<IndexEntry> additions) {
-        Preconditions.checkArgument(!additions.isEmpty());
-        int ttl=-1;
-        for (IndexEntry add : additions) {
-            int ittl = 0;
-            if (add.hasMetaData()) {
-                Preconditions.checkArgument(add.getMetaData().size()==1 && add.getMetaData().containsKey(EntryMetaData.TTL),
-                        "Elasticsearch only support TTL meta data. Found: %s",add.getMetaData());
-                ittl = (Integer)add.getMetaData().get(EntryMetaData.TTL);
-            }
-            if (ttl<0) ttl=ittl;
-            Preconditions.checkArgument(ttl==ittl,"Elasticsearch only supports uniform TTL values across all " +
-                    "index fields, but got additions: %s",additions);
-        }
-        assert ttl>=0;
-        return ttl;
     }
 
     public void restore(Map<String,Map<String, List<IndexEntry>>> documents, KeyInformation.IndexRetriever informations, BaseTransaction tx) throws BackendException {
@@ -550,7 +588,7 @@ public class ElasticSearchIndex implements IndexProvider {
                         // Add
                         if (log.isTraceEnabled())
                             log.trace("Adding entire document {}", docID);
-                        bulk.add(new IndexRequest(indexName, store, docID).source(getContent(content,determineTTL(content))));
+                        bulk.add(new IndexRequest(indexName, store, docID).source(getContent(content, informations.get(store), IndexMutation.determineTTL(content))));
                         requests++;
                     }
                 }
@@ -591,29 +629,36 @@ public class ElasticSearchIndex implements IndexProvider {
                         throw new IllegalArgumentException("Unexpected relation: " + numRel);
                 }
             } else if (value instanceof String) {
-                Mapping map = Mapping.getMapping(informations.get(key));
-                if ((map==Mapping.DEFAULT || map==Mapping.TEXT) && !titanPredicate.toString().startsWith("CONTAINS"))
+                Mapping map = getStringMapping(informations.get(key));
+                String fieldName = key;
+                if (map==Mapping.TEXT && !titanPredicate.toString().startsWith("CONTAINS"))
                     throw new IllegalArgumentException("Text mapped string values only support CONTAINS queries and not: " + titanPredicate);
                 if (map==Mapping.STRING && titanPredicate.toString().startsWith("CONTAINS"))
                     throw new IllegalArgumentException("String mapped string values do not support CONTAINS queries: " + titanPredicate);
+                if (map==Mapping.TEXTSTRING && !titanPredicate.toString().startsWith("CONTAINS"))
+                    fieldName = getDualMappingName(key);
 
                 if (titanPredicate == Text.CONTAINS) {
                     value = ((String) value).toLowerCase();
-                    return FilterBuilders.termFilter(key, (String) value);
+                    AndFilterBuilder b = FilterBuilders.andFilter();
+                    for (String term : Text.tokenize((String)value)) {
+                        b.add(FilterBuilders.termFilter(fieldName, term));
+                    }
+                    return b;
                 } else if (titanPredicate == Text.CONTAINS_PREFIX) {
                     value = ((String) value).toLowerCase();
-                    return FilterBuilders.prefixFilter(key, (String) value);
+                    return FilterBuilders.prefixFilter(fieldName, (String) value);
                 } else if (titanPredicate == Text.CONTAINS_REGEX) {
                     value = ((String) value).toLowerCase();
-                    return FilterBuilders.regexpFilter(key, (String) value);
+                    return FilterBuilders.regexpFilter(fieldName, (String) value);
                 } else if (titanPredicate == Text.PREFIX) {
-                    return FilterBuilders.prefixFilter(key, (String) value);
+                    return FilterBuilders.prefixFilter(fieldName, (String) value);
                 } else if (titanPredicate == Text.REGEX) {
-                    return FilterBuilders.regexpFilter(key, (String) value);
+                    return FilterBuilders.regexpFilter(fieldName, (String) value);
                 } else if (titanPredicate == Cmp.EQUAL) {
-                    return FilterBuilders.termFilter(key, (String) value);
+                    return FilterBuilders.termFilter(fieldName, (String) value);
                 } else if (titanPredicate == Cmp.NOT_EQUAL) {
-                    return FilterBuilders.notFilter(FilterBuilders.termFilter(key, (String) value));
+                    return FilterBuilders.notFilter(FilterBuilders.termFilter(fieldName, (String) value));
                 } else
                     throw new IllegalArgumentException("Predicate is not supported for string value: " + titanPredicate);
             } else if (value instanceof Geoshape) {
@@ -719,6 +764,8 @@ public class ElasticSearchIndex implements IndexProvider {
                     return titanPredicate == Text.CONTAINS || titanPredicate == Text.CONTAINS_PREFIX || titanPredicate == Text.CONTAINS_REGEX;
                 case STRING:
                     return titanPredicate == Cmp.EQUAL || titanPredicate==Cmp.NOT_EQUAL || titanPredicate==Text.REGEX || titanPredicate==Text.PREFIX;
+                case TEXTSTRING:
+                    return (titanPredicate instanceof Text) || titanPredicate == Cmp.EQUAL || titanPredicate==Cmp.NOT_EQUAL;
             }
         }
         return false;
@@ -732,9 +779,16 @@ public class ElasticSearchIndex implements IndexProvider {
         if (Number.class.isAssignableFrom(dataType) || dataType == Geoshape.class) {
             if (mapping==Mapping.DEFAULT) return true;
         } else if (AttributeUtil.isString(dataType)) {
-            if (mapping==Mapping.DEFAULT || mapping==Mapping.STRING || mapping==Mapping.TEXT) return true;
+            if (mapping==Mapping.DEFAULT || mapping==Mapping.STRING
+                    || mapping==Mapping.TEXT || mapping==Mapping.TEXTSTRING) return true;
         }
         return false;
+    }
+
+    @Override
+    public String mapKey2Field(String key, KeyInformation information) {
+        Preconditions.checkArgument(!StringUtils.containsAny(key,new char[]{' '}),"Invalid key name provided: %s",key);
+        return key;
     }
 
     @Override
@@ -781,11 +835,21 @@ public class ElasticSearchIndex implements IndexProvider {
     }
 
     private void checkExpectedClientVersion() {
-        if (!Version.CURRENT.equals(ElasticSearchConstants.ES_VERSION_EXPECTED)) {
-            log.warn("ES client version {} does not match the version with which Titan was compiled {}.  This might cause problems.",
-                    Version.CURRENT, ElasticSearchConstants.ES_VERSION_EXPECTED);
-        } else {
-            log.debug("Found expected ES client version: {} (OK)", Version.CURRENT);
+        /*
+         * This is enclosed in a catch block to prevent an unchecked exception
+         * from killing the startup thread.  This check is just advisory -- the
+         * most it does is log a warning -- so there's no reason to allow it to
+         * emit a exception and potentially block graph startup.
+         */
+        try {
+            if (!Version.CURRENT.toString().equals(ElasticSearchConstants.ES_VERSION_EXPECTED)) {
+                log.warn("ES client version ({}) does not match the version with which Titan was compiled ({}).  This might cause problems.",
+                        Version.CURRENT, ElasticSearchConstants.ES_VERSION_EXPECTED);
+            } else {
+                log.debug("Found ES client version matching Titan's compile-time version: {} (OK)", Version.CURRENT);
+            }
+        } catch (RuntimeException e) {
+            log.warn("Unable to check expected ES client version", e);
         }
     }
 }

@@ -16,7 +16,16 @@ import com.thinkaurelius.titan.diskstorage.util.time.Timestamps;
 import com.thinkaurelius.titan.graphdb.configuration.GraphDatabaseConfiguration;
 import com.thinkaurelius.titan.graphdb.query.condition.PredicateCondition;
 import org.apache.commons.configuration.BaseConfiguration;
+import org.elasticsearch.action.admin.indices.refresh.RefreshRequestBuilder;
+import org.elasticsearch.action.admin.indices.settings.get.GetSettingsRequest;
+import org.elasticsearch.action.admin.indices.settings.get.GetSettingsRequestBuilder;
+import org.elasticsearch.action.admin.indices.settings.get.GetSettingsResponse;
+import org.elasticsearch.client.node.NodeClient;
+import org.elasticsearch.common.settings.ImmutableSettings;
+import org.elasticsearch.node.Node;
+import org.elasticsearch.node.NodeBuilder;
 import org.junit.Assert;
+import org.junit.BeforeClass;
 import org.junit.Test;
 
 import java.io.File;
@@ -41,12 +50,19 @@ public class ElasticSearchConfigTest {
 
     private static final String INDEX_NAME = "escfg";
 
+    @BeforeClass
+    public static void killElasticsearch() {
+        ElasticsearchRunner esr = new ElasticsearchRunner();
+        esr.stop();
+    }
+
     @Test
     public void testTransportClient() throws BackendException, InterruptedException {
         ElasticsearchRunner esr = new ElasticsearchRunner();
         esr.start();
         ModifiableConfiguration config = GraphDatabaseConfiguration.buildConfiguration();
         config.set(INTERFACE, ElasticSearchSetup.TRANSPORT_CLIENT, INDEX_NAME);
+        config.set(INDEX_HOSTS, new String[]{ "127.0.0.1" }, INDEX_NAME);
         Configuration indexConfig = config.restrictTo(INDEX_NAME);
         IndexProvider idx = new ElasticSearchIndex(indexConfig);
         simpleWriteAndQuery(idx);
@@ -204,18 +220,51 @@ public class ElasticSearchConfigTest {
         esr.stop();
     }
 
+    @Test
+    public void testIndexCreationOptions() throws InterruptedException, BackendException {
+        final int shards = 77;
+
+        ElasticsearchRunner esr = new ElasticsearchRunner();
+        esr.start();
+        CommonsConfiguration cc = new CommonsConfiguration(new BaseConfiguration());
+        cc.set("index." + INDEX_NAME + ".elasticsearch.create.ext.number_of_shards", String.valueOf(shards));
+        ModifiableConfiguration config =
+                new ModifiableConfiguration(GraphDatabaseConfiguration.ROOT_NS,
+                        cc, BasicConfiguration.Restriction.NONE);
+        config.set(INTERFACE, ElasticSearchSetup.NODE, INDEX_NAME);
+        Configuration indexConfig = config.restrictTo(INDEX_NAME);
+        IndexProvider idx = new ElasticSearchIndex(indexConfig);
+        simpleWriteAndQuery(idx);
+        idx.close();
+
+
+        ImmutableSettings.Builder settingsBuilder = ImmutableSettings.settingsBuilder();
+        settingsBuilder.put("discovery.zen.ping.multicast.enabled", "false");
+        settingsBuilder.put("discovery.zen.ping.unicast.hosts", "localhost,127.0.0.1:9300");
+        NodeBuilder nodeBuilder = NodeBuilder.nodeBuilder().settings(settingsBuilder.build());
+        nodeBuilder.client(true).data(false).local(false);
+        Node n = nodeBuilder.build().start();
+        GetSettingsRequest request = new GetSettingsRequestBuilder((NodeClient)n.client(), "titan").request();
+        GetSettingsResponse response = n.client().admin().indices().getSettings(request).actionGet();
+        assertEquals(String.valueOf(shards), response.getSetting("titan", "index.number_of_shards"));
+
+        n.stop();
+        esr.stop();
+    }
+
     private void simpleWriteAndQuery(IndexProvider idx) throws BackendException, InterruptedException {
 
         final Duration maxWrite = new StandardDuration(2000L, TimeUnit.MILLISECONDS);
         final String storeName = "jvmlocal_test_store";
+        final KeyInformation.IndexRetriever indexRetriever = IndexProviderTest.getIndexRetriever(IndexProviderTest.getMapping(idx.getFeatures()));
 
         BaseTransactionConfig txConfig = StandardBaseTransactionConfig.of(Timestamps.MILLI);
-        IndexTransaction itx = new IndexTransaction(idx, IndexProviderTest.indexRetriever, txConfig, maxWrite);
+        IndexTransaction itx = new IndexTransaction(idx, indexRetriever, txConfig, maxWrite);
         assertEquals(0, itx.query(new IndexQuery(storeName, PredicateCondition.of(IndexProviderTest.NAME, Text.PREFIX, "ali"))).size());
         itx.add(storeName, "doc", IndexProviderTest.NAME, "alice", false);
         itx.commit();
         Thread.sleep(1500L); // Slightly longer than default 1s index.refresh_interval
-        itx = new IndexTransaction(idx, IndexProviderTest.indexRetriever, txConfig, maxWrite);
+        itx = new IndexTransaction(idx, indexRetriever, txConfig, maxWrite);
         assertEquals(0, itx.query(new IndexQuery(storeName, PredicateCondition.of(IndexProviderTest.NAME, Text.PREFIX, "zed"))).size());
         assertEquals(1, itx.query(new IndexQuery(storeName, PredicateCondition.of(IndexProviderTest.NAME, Text.PREFIX, "ali"))).size());
         itx.rollback();

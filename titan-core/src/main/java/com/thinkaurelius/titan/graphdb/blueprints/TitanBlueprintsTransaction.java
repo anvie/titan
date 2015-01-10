@@ -119,8 +119,8 @@ public abstract class TitanBlueprintsTransaction implements TitanTransaction {
     @Override
     public TitanEdge addEdge(Object id, Vertex outVertex, Vertex inVertex, String label) {
         //Preconditions.checkArgument(id==null,"Titan does not support edge id assignment");
-        Preconditions.checkArgument(outVertex instanceof TitanVertex);
-        Preconditions.checkArgument(inVertex instanceof TitanVertex);
+        Preconditions.checkArgument(outVertex instanceof TitanVertex, "Expected a TitanVertex but got: %s", outVertex);
+        Preconditions.checkArgument(inVertex instanceof TitanVertex, "Expected a TitanVertex but got: %s", inVertex);
         return addEdge((TitanVertex) outVertex, (TitanVertex) inVertex, label);
     }
 
@@ -129,7 +129,7 @@ public abstract class TitanBlueprintsTransaction implements TitanTransaction {
         if (null == label) {
             throw new IllegalArgumentException("Edge label must be non-null");
         }
-        return addEdge(outVertex, inVertex, getEdgeLabel(label));
+        return addEdge(outVertex, inVertex, getOrCreateEdgeLabel(label));
     }
 
 
@@ -165,7 +165,7 @@ public abstract class TitanBlueprintsTransaction implements TitanTransaction {
 
     @Override
     public TitanProperty addProperty(TitanVertex vertex, String key, Object attribute) {
-        return addProperty(vertex, getPropertyKey(key), attribute);
+        return addProperty(vertex, getOrCreatePropertyKey(key), attribute);
     }
 
     @Override

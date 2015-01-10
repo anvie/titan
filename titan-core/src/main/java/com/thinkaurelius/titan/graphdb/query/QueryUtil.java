@@ -132,7 +132,8 @@ public class QueryUtil {
             RelationType type = getType(tx, atom.getKey());
 
             if (type == null) {
-                if (atom.getPredicate() == Cmp.EQUAL && atom.getValue() == null)
+                if (atom.getPredicate() == Cmp.EQUAL && atom.getValue() == null ||
+                        (atom.getPredicate() == Cmp.NOT_EQUAL && atom.getValue() != null))
                     continue; //Ignore condition, its trivially satisfied
 
                 return null;
@@ -188,6 +189,24 @@ public class QueryUtil {
     }
 
 
+    public static Map.Entry<RelationType,Collection> extractOrCondition(Or<TitanRelation> condition) {
+        RelationType masterType = null;
+        List<Object> values = new ArrayList<Object>();
+        for (Condition c : condition.getChildren()) {
+            if (!(c instanceof PredicateCondition)) return null;
+            PredicateCondition<RelationType, TitanRelation> atom = (PredicateCondition)c;
+            if (atom.getPredicate()!=Cmp.EQUAL) return null;
+            Object value = atom.getValue();
+            if (value==null) return null;
+            RelationType type = atom.getKey();
+            if (masterType==null) masterType=type;
+            else if (!masterType.equals(type)) return null;
+            values.add(value);
+        }
+        if (masterType==null) return null;
+        assert !values.isEmpty();
+        return new AbstractMap.SimpleImmutableEntry(masterType,values);
+    }
 
 
     public static <R> List<R> processIntersectingRetrievals(List<IndexCall<R>> retrievals, final int limit) {

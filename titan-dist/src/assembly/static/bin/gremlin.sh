@@ -124,13 +124,11 @@ while getopts "eilv" opt; do
        # processing gremlin.sh arguments as soon as the -e switch is
        # seen; everything following -e becomes arguments to the
        # ScriptExecutor main class
-       shift $(( $OPTIND - 1 ))
        break;;
     i) MAIN_CLASS=com.thinkaurelius.titan.hadoop.tinkerpop.gremlin.InlineScriptExecutor
        # This class was brought in with Faunus/titan-hadoop. Like -e,
        # everything after this option is treated as an argument to the
        # main class.
-       shift $(( $OPTIND - 1 ))
        break;;
     l) eval GREMLIN_LOG_LEVEL=\$$OPTIND
        GREMLIN_MR_LOG_LEVEL="$GREMLIN_LOG_LEVEL"
@@ -143,6 +141,9 @@ while getopts "eilv" opt; do
     v) MAIN_CLASS=com.tinkerpop.gremlin.Version
     esac
 done
+
+# Discard shell script options
+shift $(( $OPTIND - 1 ))
 
 if [ -z "${JAVA_OPTIONS:-}" ]; then
     JAVA_OPTIONS="-Dlog4j.configuration=log4j-gremlin.properties"
