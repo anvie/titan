@@ -1292,7 +1292,7 @@ public class GraphDatabaseConfiguration {
 
                 //Write Titan version
                 Preconditions.checkArgument(!globalWrite.has(INITIAL_TITAN_VERSION),"Database has already been initialized but not frozen");
-                globalWrite.set(INITIAL_TITAN_VERSION,TitanConstants.VERSION);
+                globalWrite.set(INITIAL_TITAN_VERSION, normVersion(TitanConstants.VERSION));
 
                 // If partitioning is unspecified, specify it now
                 if (!localbc.has(CLUSTER_PARTITION)) {
@@ -1325,7 +1325,11 @@ public class GraphDatabaseConfiguration {
             } else {
                 String version = globalWrite.get(INITIAL_TITAN_VERSION);
                 Preconditions.checkArgument(version!=null,"Titan version has not been initialized");
-                if (!(TitanConstants.VERSION.equals(version) || TitanConstants.VERSION.equals(version + "-SNAPSHOT")) && !TitanConstants.COMPATIBLE_VERSIONS.contains(version)) {
+
+                version = normVersion(version);
+
+                if (!normVersion(TitanConstants.VERSION).equals(version) &&
+                        !TitanConstants.COMPATIBLE_VERSIONS.contains(version)) {
                     throw new TitanException("StorageBackend version " + version + " is incompatible with current Titan version: " + TitanConstants.VERSION + 
                         ", compatible versions are: " + Joiner.on(", ").join(TitanConstants.COMPATIBLE_VERSIONS));
                 }
@@ -1416,6 +1420,18 @@ public class GraphDatabaseConfiguration {
 
         this.configuration = new MergedConfiguration(overwrite,combinedConfig);
         preLoadConfiguration();
+    }
+
+    private String normVersion(String ver){
+        String version = ver;
+        // split any postfixes
+        if (version != null){
+            String[] s = version.split("\\-");
+            if (s.length > 0){
+                version = s[0];
+            }
+        }
+        return version;
     }
 
     private static Map<ConfigElement.PathIdentifier, Object> getGlobalSubset(Map<ConfigElement.PathIdentifier, Object> m) {
