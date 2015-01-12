@@ -2,8 +2,10 @@ package com.thinkaurelius.titan.pkgtest;
 
 import static org.junit.Assert.assertEquals;
 
+import java.io.*;
 import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileReader;
 import java.io.FileWriter;
 import java.io.IOException;
 import java.io.InputStream;
@@ -19,6 +21,7 @@ import org.apache.velocity.Template;
 import org.apache.velocity.VelocityContext;
 import org.apache.velocity.app.Velocity;
 
+import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableMap;
 import com.thinkaurelius.titan.core.TitanFactory;
 
@@ -34,7 +37,9 @@ public abstract class AbstractTitanAssemblyIT {
 
         try {
             props = new Properties();
-            props.load(TitanFactory.class.getClassLoader().getResourceAsStream("target.properties"));
+            java.io.FileReader fr = new FileReader(Joiner.on(File.separator).join(new String[] { "target", "test-classes", "target.properties" }));;
+            props.load(fr);
+            fr.close();
         } catch (IOException e) {
             throw new AssertionError(e);
         }
@@ -61,6 +66,10 @@ public abstract class AbstractTitanAssemblyIT {
         FileUtils.deleteQuietly(new File(ZIPFILE_EXTRACTED));
         unzip(BUILD_DIR, ZIPFILE_PATH);
 
+        parseTemplateAndRunExpect(expectTemplateName, contextVars);
+    }
+
+    protected void parseTemplateAndRunExpect(String expectTemplateName, Map<String, String> contextVars) throws IOException, InterruptedException {
         VelocityContext context = new VelocityContext();
         for (Map.Entry<String, String> ent : contextVars.entrySet()) {
             context.put(ent.getKey(), ent.getValue());
@@ -89,11 +98,11 @@ public abstract class AbstractTitanAssemblyIT {
         command(new File(dir), "expect", expectScript);
     }
 
-    private static void unzip(String dir, String zipfile) throws IOException, InterruptedException {
+    protected static void unzip(String dir, String zipfile) throws IOException, InterruptedException {
         command(new File(dir), "unzip", "-q", zipfile);
     }
 
-    private static void command(File dir, String... command) throws IOException, InterruptedException {
+    protected static void command(File dir, String... command) throws IOException, InterruptedException {
         ProcessBuilder pb = new ProcessBuilder(command);
         pb.directory(dir);
 //        pb.redirectInput(Redirect.PIPE);

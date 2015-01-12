@@ -3,7 +3,7 @@
     <parent>
         <groupId>com.thinkaurelius.titan</groupId>
         <artifactId>titan</artifactId>
-        <version>0.5.1-SNAPSHOT</version>
+        <version>0.5.4-digaku-SNAPSHOT</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
     <packaging>pom</packaging>
@@ -16,6 +16,9 @@
 
         <!-- Zipfile/Tarfile assembly source paths -->
         <assembly.txtfile.dir>${top.level.basedir}</assembly.txtfile.dir>
+        <assembly.cfilter.in.dir>${project.basedir}/src/assembly/cfilter</assembly.cfilter.in.dir>
+        <assembly.cfilter.out.dir>${project.build.directory}/cfilter</assembly.cfilter.out.dir>
+        <assembly.descriptor.dir>${project.basedir}/src/assembly/descriptor</assembly.descriptor.dir>
 
         <!-- Variables for integration testing on release-candidate archive files -->
         <test.expect.dir>${project.build.directory}/test-classes</test.expect.dir>
@@ -70,6 +73,13 @@
             <groupId>com.tinkerpop.rexster</groupId>
             <artifactId>rexster-server</artifactId>
             <version>${tinkerpop.version}</version>
+            <exclusions>
+                <!-- A specially shaded pair of Groovy and ASM classfiles is provided by titan-core -->
+                <exclusion>
+                    <groupId>org.codehaus.groovy</groupId>
+                    <artifactId>groovy</artifactId>
+                </exclusion>
+            </exclusions>
         </dependency>
         <!-- Test dependencies -->
         <dependency>
@@ -258,6 +268,27 @@
                                 <argument>com.thinkaurelius.titan.hadoop.formats.script.ScriptConfig.ROOT_NS</argument>
                                 <argument>${asciidoc.output.dir}/listings/faunus_script_cfg.txt</argument>
                                 <argument>false</argument>
+                            </arguments>
+                        </configuration>
+                    </execution>
+                    <execution>
+                        <id>run-cfilter</id>
+                        <phase>generate-resources</phase>
+                        <goals>
+                            <goal>exec</goal>
+                        </goals>
+                        <configuration>
+                            <executable>java</executable>
+                            <arguments>
+                                <!-- Classpath -->
+                                <argument>-classpath</argument>
+                                <classpath />
+                                <!-- Main Classname -->
+                                <mainClass>com.thinkaurelius.titan.util.system.ConfigurationFileFilter</mainClass>
+                                <!-- Input directory (processed recursively) -->
+                                <argument>${assembly.cfilter.in.dir}</argument>
+                                <!-- Output directory prefix -->
+                                <argument>${assembly.cfilter.out.dir}</argument>
                             </arguments>
                         </configuration>
                     </execution>
@@ -491,6 +522,9 @@
                                         <directory>${top.level.basedir}/db/</directory>
                                     </fileset>
                                     <fileset>
+                                        <directory>${top.level.basedir}/examples/</directory>
+                                    </fileset>
+                                    <fileset>
                                         <directory>${top.level.basedir}/ext/</directory>
                                     </fileset>
                                     <fileset>
@@ -498,6 +532,9 @@
                                     </fileset>
                                     <fileset>
                                         <directory>${top.level.basedir}/log/</directory>
+                                    </fileset>
+                                    <fileset>
+                                        <directory>${top.level.basedir}/rexhome/</directory>
                                     </fileset>
                                 </filesets>
                             </configuration>
@@ -659,66 +696,6 @@
             </dependencies>
 
             <build>
-                <plugins>
-                    <plugin>
-                        <artifactId>maven-resources-plugin</artifactId>
-                        <inherited>false</inherited>
-                        <executions>
-                            <execution>
-                                <id>filter-release-resources</id>
-                                <phase>process-resources</phase>
-                                <goals>
-                                    <goal>copy-resources</goal>
-                                </goals>
-                                <configuration>
-                                    <outputDirectory>${project.build.directory}/release</outputDirectory>
-                                    <useDefaultDelimiters>false</useDefaultDelimiters>
-                                    <delimiters>
-                                        <delimiter>$MAVEN{*}</delimiter>
-                                    </delimiters>
-                                    <resources>
-                                        <resource>
-                                            <directory>src/release</directory>
-                                            <filtering>true</filtering>
-                                        </resource>
-                                    </resources>
-                                </configuration>
-                            </execution>
-                        </executions>
-                    </plugin>
-
-                    <!--
-                        We use maven-resources-plugin to filter src/release,
-                        but that plugin has an open bug about the fact that it
-                        doesn't copy file permissions during filtering. Make
-                        the script executable with chmod. Not portable.
-
-                        Bug: http://jira.codehaus.org/browse/MRESOURCES-132
-                    -->
-                    <plugin>
-                        <groupId>org.codehaus.mojo</groupId>
-                        <artifactId>exec-maven-plugin</artifactId>
-                        <inherited>false</inherited>
-                        <executions>
-                            <execution>
-                                <id>fix-script-permissions</id>
-                                <phase>process-resources</phase>
-                                <goals>
-                                    <goal>exec</goal>
-                                </goals>
-                                <configuration>
-                                    <executable>chmod</executable>
-                                    <arguments>
-                                        <argument>-R</argument>
-                                        <argument>ug+x</argument>
-                                        <argument>${project.build.directory}/release/</argument>
-                                    </arguments>
-                                    <workingDirectory>${project.basedir}</workingDirectory>
-                                </configuration>
-                            </execution>
-                        </executions>
-                    </plugin>
-                </plugins>
 
                 <pluginManagement>
                     <plugins>
@@ -753,28 +730,10 @@
                                         <appendAssemblyId>false</appendAssemblyId>
                                         <tarLongFileMode>gnu</tarLongFileMode>
                                         <descriptors>
-                                            <descriptor>${project.basedir}/src/assembly/descriptor/archive.xml</descriptor>
+                                            <descriptor>${assembly.descriptor.dir}/archive.xml</descriptor>
                                         </descriptors>
                                         <formats>
                                             <format>zip</format>
-                                        </formats>
-                                    </configuration>
-                                </execution>
-                                <execution>
-                                    <id>unpack-titan-core-javadocs</id>
-                                    <phase>package</phase>
-                                    <goals>
-                                        <goal>single</goal>
-                                    </goals>
-                                    <configuration>
-                                        <attach>false</attach>
-                                        <finalName>javadocs</finalName>
-                                        <appendAssemblyId>false</appendAssemblyId>
-                                        <descriptors>
-                                            <descriptor>${assembly.descriptor.dir}/javadocs.xml</descriptor>
-                                        </descriptors>
-                                        <formats>
-                                            <format>dir</format>
                                         </formats>
                                     </configuration>
                                 </execution>
@@ -802,7 +761,7 @@
                                     </goals>
                                     <configuration>
                                         <fromDir>${project.build.directory}</fromDir>
-                                        <includes>*.tar.bz2.asc,*.zip.asc,*.zip,*.tar.bz2</includes>
+                                        <includes>titan*.tar.bz2.asc,titan*.zip.asc,titan*.zip,titan*.tar.bz2</includes>
                                         <serverId>aurelius.s3</serverId> <!-- your ~/.m2/settings.xml must match -->
                                         <url>s3://s3.thinkaurelius.com/downloads/titan/</url>
                                     </configuration>
@@ -906,7 +865,23 @@
                                                 <filtering>true</filtering>
                                             </resource>
                                         </resources>
-                                        <outputDirectory>${project.build.outputDirectory}</outputDirectory>
+                                        <outputDirectory>${project.build.testOutputDirectory}</outputDirectory>
+                                    </configuration>
+                                </execution>
+                                <execution>
+                                    <id>copy-test-cfiles</id>
+                                    <phase>none</phase>
+                                    <goals>
+                                        <goal>copy-resources</goal>
+                                    </goals>
+                                    <configuration>
+                                        <resources>
+                                            <resource>
+                                                <directory>${assembly.cfilter.out.dir}</directory>
+                                                <filtering>false</filtering>
+                                            </resource>
+                                        </resources>
+                                        <outputDirectory>${project.build.directory}</outputDirectory>
                                     </configuration>
                                 </execution>
                             </executions>
@@ -933,6 +908,7 @@
                                         <excludes>
                                             <exclude>**/*HBase*IT.java</exclude>
                                             <exclude>**/*Cassandra*IT.java</exclude>
+                                            <exclude>**/*CompatIT.java</exclude>
                                         </excludes>
                                     </configuration>
                                 </execution>
@@ -969,7 +945,7 @@
                                     </configuration>
                                 </execution>
                                 <execution>
-                                    <id>cassandra-hbase-integration-test</id>
+                                    <id>hbase-integration-test</id>
                                     <phase>integration-test</phase>
                                     <goals>
                                         <goal>integration-test</goal>
@@ -980,6 +956,21 @@
                                         <failIfNoTests>false</failIfNoTests>
                                         <includes>
                                             <include>**/*HBase*IT.java</include>
+                                        </includes>
+                                    </configuration>
+                                </execution>
+                                <execution>
+                                    <id>version-compat-integration-test</id>
+                                    <phase>integration-test</phase>
+                                    <goals>
+                                        <goal>integration-test</goal>
+                                    </goals>
+                                    <configuration>
+                                        <reportNameSuffix>compat</reportNameSuffix>
+                                        <failIfNoTests>false</failIfNoTests>
+                                        <skip>${skipCompatITs}</skip>
+                                        <includes>
+                                            <include>**/*CompatIT.java</include>
                                         </includes>
                                     </configuration>
                                 </execution>
@@ -997,6 +988,94 @@
                         </plugin>
                     </plugins>
                 </pluginManagement>
+
+                <plugins>
+                    <plugin>
+                        <artifactId>maven-resources-plugin</artifactId>
+                        <inherited>false</inherited>
+                        <executions>
+                            <execution>
+                                <id>filter-release-resources</id>
+                                <phase>process-resources</phase>
+                                <goals>
+                                    <goal>copy-resources</goal>
+                                </goals>
+                                <configuration>
+                                    <outputDirectory>${project.build.directory}/release</outputDirectory>
+                                    <useDefaultDelimiters>false</useDefaultDelimiters>
+                                    <delimiters>
+                                        <delimiter>$MAVEN{*}</delimiter>
+                                    </delimiters>
+                                    <resources>
+                                        <resource>
+                                            <directory>src/release</directory>
+                                            <filtering>true</filtering>
+                                        </resource>
+                                    </resources>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+
+                    <!--
+                        We use maven-resources-plugin to filter src/release,
+                        but that plugin has an open bug about the fact that it
+                        doesn't copy file permissions during filtering. Make
+                        the script executable with chmod. Not portable.
+
+                        Bug: http://jira.codehaus.org/browse/MRESOURCES-132
+                    -->
+                    <plugin>
+                        <groupId>org.codehaus.mojo</groupId>
+                        <artifactId>exec-maven-plugin</artifactId>
+                        <inherited>false</inherited>
+                        <executions>
+                            <execution>
+                                <id>fix-script-permissions</id>
+                                <phase>process-resources</phase>
+                                <goals>
+                                    <goal>exec</goal>
+                                </goals>
+                                <configuration>
+                                    <executable>chmod</executable>
+                                    <arguments>
+                                        <argument>-R</argument>
+                                        <argument>ug+x</argument>
+                                        <argument>${project.build.directory}/release/</argument>
+                                    </arguments>
+                                    <workingDirectory>${project.basedir}</workingDirectory>
+                                </configuration>
+                            </execution>
+                        </executions>
+                    </plugin>
+
+                    <plugin>
+                        <artifactId>maven-assembly-plugin</artifactId>
+                        <inherited>false</inherited>
+                        <executions>
+                            <execution>
+                                <id>unpack-titan-core-javadocs</id>
+                                <phase>package</phase>
+                                <goals>
+                                    <goal>single</goal>
+                                </goals>
+                                <configuration>
+                                    <attach>false</attach>
+                                    <finalName>javadocs</finalName>
+                                    <appendAssemblyId>false</appendAssemblyId>
+                                    <descriptors>
+                                        <descriptor>${assembly.descriptor.dir}/javadocs.xml</descriptor>
+                                    </descriptors>
+                                </configuration>
+                            </execution>
+
+                            <execution>
+                                <id>assemble-distribution-archive</id>
+                                <phase>none</phase>
+                            </execution>
+                        </executions>
+                    </plugin>
+                </plugins>
             </build>
         </profile>
     </profiles>

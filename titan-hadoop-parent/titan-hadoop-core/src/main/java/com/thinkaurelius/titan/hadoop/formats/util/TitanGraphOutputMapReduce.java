@@ -9,9 +9,11 @@ import com.google.common.collect.Iterables;
 import com.thinkaurelius.titan.core.*;
 import com.thinkaurelius.titan.diskstorage.cassandra.AbstractCassandraStoreManager;
 import com.thinkaurelius.titan.diskstorage.configuration.ModifiableConfiguration;
+import com.thinkaurelius.titan.graphdb.schema.SchemaContainer;
 import com.thinkaurelius.titan.graphdb.types.system.BaseVertexLabel;
 import com.thinkaurelius.titan.hadoop.*;
 import com.thinkaurelius.titan.hadoop.config.ModifiableHadoopConfiguration;
+import com.thinkaurelius.titan.hadoop.config.TitanHadoopConfiguration;
 import com.tinkerpop.blueprints.*;
 
 import org.apache.hadoop.fs.FileSystem;
@@ -79,7 +81,15 @@ public class TitanGraphOutputMapReduce {
             ModifiableConfiguration mc = titanConf.getOutputConf();
             boolean present = mc.has(AbstractCassandraStoreManager.CASSANDRA_KEYSPACE);
             LOGGER.trace("Keyspace in_config=" + present + " value=" + mc.get(AbstractCassandraStoreManager.CASSANDRA_KEYSPACE));
-            return TitanFactory.open(mc);
+            TitanGraph g = TitanFactory.open(mc);
+
+//            final boolean checkTypes = titanConf.get(TitanHadoopConfiguration.OUTPUT_TITAN_TYPE_CHECKING);
+//
+//            if (checkTypes) {
+//                FaunusSchemaManager.getTypeManager(null).setSchemaProvider(new SchemaContainer(g));
+//            }
+
+            return g;
         } else {
             throw new RuntimeException("The provide graph output format is not a supported TitanOutputFormat: " + format.getName());
         }
@@ -106,7 +116,7 @@ public class TitanGraphOutputMapReduce {
         public void setup(final Mapper.Context context) throws IOException, InterruptedException {
             faunusConf = ModifiableHadoopConfiguration.of(DEFAULT_COMPAT.getContextConfiguration(context));
             graph = TitanGraphOutputMapReduce.generateGraph(faunusConf);
-            trackState = context.getConfiguration().getBoolean(Tokens.TITAN_HADOOP_PIPELINE_TRACK_STATE, false);
+            trackState = DEFAULT_COMPAT.getContextConfiguration(context).getBoolean(Tokens.TITAN_HADOOP_PIPELINE_TRACK_STATE, false);
 
             // Check whether a script is defined in the config
             if (faunusConf.has(OUTPUT_LOADER_SCRIPT_FILE)) {
@@ -184,8 +194,8 @@ public class TitanGraphOutputMapReduce {
                 if (faunusVertex.isNew() || faunusVertex.isModified()) {
                     //Synchronize properties
                     for (final TitanProperty p : faunusVertex.query().queryAll().properties()) {
-                        if (null != loaderScript && loaderScript.hasPropMethod()) {
-                            loaderScript.getProp(p, titanVertex, graph, context);
+                        if (null != loaderScript && loaderScript.hasVPropMethod()) {
+                            loaderScript.getVProp(p, titanVertex, graph, context);
                         } else {
                             getCreateOrDeleteRelation(graph, trackState, OUT, faunusVertex, titanVertex,
                                     (StandardFaunusProperty) p, context);
@@ -366,7 +376,7 @@ public class TitanGraphOutputMapReduce {
         public void setup(final Mapper.Context context) throws IOException, InterruptedException {
             faunusConf = ModifiableHadoopConfiguration.of(DEFAULT_COMPAT.getContextConfiguration(context));
             graph = TitanGraphOutputMapReduce.generateGraph(faunusConf);
-            trackState = context.getConfiguration().getBoolean(Tokens.TITAN_HADOOP_PIPELINE_TRACK_STATE, false);
+            trackState = DEFAULT_COMPAT.getContextConfiguration(context).getBoolean(Tokens.TITAN_HADOOP_PIPELINE_TRACK_STATE, false);
 
             // Check whether a script is defined in the config
             if (faunusConf.has(OUTPUT_LOADER_SCRIPT_FILE)) {

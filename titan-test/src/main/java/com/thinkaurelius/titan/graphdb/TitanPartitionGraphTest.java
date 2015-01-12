@@ -6,6 +6,7 @@ import com.google.common.collect.*;
 import com.thinkaurelius.titan.core.*;
 import com.thinkaurelius.titan.core.olap.OLAPJobBuilder;
 import com.thinkaurelius.titan.core.olap.OLAPResult;
+import com.thinkaurelius.titan.core.schema.VertexLabelMaker;
 import com.thinkaurelius.titan.diskstorage.configuration.BasicConfiguration;
 import com.thinkaurelius.titan.diskstorage.configuration.ModifiableConfiguration;
 import com.thinkaurelius.titan.diskstorage.configuration.WriteConfiguration;
@@ -16,10 +17,13 @@ import com.thinkaurelius.titan.graphdb.fulgora.FulgoraBuilder;
 import com.thinkaurelius.titan.graphdb.idmanagement.IDManager;
 import com.thinkaurelius.titan.olap.OLAPTest;
 import com.thinkaurelius.titan.testcategory.OrderedKeyStoreTests;
+import com.thinkaurelius.titan.testcategory.UnorderedKeyStoreTests;
 import com.thinkaurelius.titan.util.datastructures.AbstractLongListUtil;
 import com.tinkerpop.blueprints.Direction;
 import org.junit.Test;
 import org.junit.experimental.categories.Category;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 
 import java.util.*;
@@ -32,8 +36,10 @@ import static org.junit.Assert.assertEquals;
  *
  * @author Matthias Broecheler (me@matthiasb.com)
  */
-@Category({ OrderedKeyStoreTests.class })
 public abstract class TitanPartitionGraphTest extends TitanGraphBaseTest {
+
+    private static final Logger log =
+            LoggerFactory.getLogger(TitanPartitionGraphTest.class);
 
     final static Random random = new Random();
     final static int numPartitions = 8;
@@ -49,7 +55,8 @@ public abstract class TitanPartitionGraphTest extends TitanGraphBaseTest {
     public WriteConfiguration getConfiguration() {
         WriteConfiguration config = getBaseConfiguration();
         ModifiableConfiguration mconf = new ModifiableConfiguration(GraphDatabaseConfiguration.ROOT_NS,config, BasicConfiguration.Restriction.NONE);
-        mconf.set(GraphDatabaseConfiguration.CLUSTER_PARTITION,true);
+        // Let GraphDatabaseConfiguration's config freezer set CLUSTER_PARTITION
+        //mconf.set(GraphDatabaseConfiguration.CLUSTER_PARTITION,true);
         mconf.set(GraphDatabaseConfiguration.CLUSTER_MAX_PARTITIONS,numPartitions);
         //uses SimpleBulkPlacementStrategy by default
         mconf.set(SimpleBulkPlacementStrategy.CONCURRENT_PARTITIONS,16);
@@ -57,6 +64,19 @@ public abstract class TitanPartitionGraphTest extends TitanGraphBaseTest {
     }
 
     @Test
+    @Category({ OrderedKeyStoreTests.class })
+    public void testOrderedConfig() {
+        assertTrue(graph.getConfiguration().isClusterPartitioned());
+    }
+
+    @Test
+    @Category({ UnorderedKeyStoreTests.class })
+    public void testUnorderedConfig() {
+        assertFalse(graph.getConfiguration().isClusterPartitioned());
+    }
+
+    @Test
+    @Category({ OrderedKeyStoreTests.class })
     public void testSetup() {
         final IDManager idManager = graph.getIDManager();
         assertEquals(8, idManager.getPartitionBound());
@@ -67,6 +87,7 @@ public abstract class TitanPartitionGraphTest extends TitanGraphBaseTest {
     }
 
     @Test
+    @Category({ OrderedKeyStoreTests.class })
     public void testVertexPartitioning() throws Exception {
         Object[] options = {option(GraphDatabaseConfiguration.IDS_FLUSH),false};
         clopen(options);
@@ -288,6 +309,34 @@ public abstract class TitanPartitionGraphTest extends TitanGraphBaseTest {
         }
     }
 
+    @Test
+    @Category({ UnorderedKeyStoreTests.class })
+    public void testVLabelOnUnorderedStorage() {
+        final String label = "pl";
+        VertexLabelMaker maker = mgmt.makeVertexLabel(label);
+        try {
+            // Exception should be thrown in one of these two methods
+            maker.partition().make();
+            fail("Partitioned label must be rejected on unordered key stores");
+        } catch (IllegalArgumentException e) {
+            log.debug("Caught expected exception", e);
+        }
+    }
+
+    @Test
+    @Category({ OrderedKeyStoreTests.class })
+    public void testVLabelOnOrderedStorage() {
+        final String label = "pl";
+        mgmt.makeVertexLabel(label).partition().make();
+        mgmt.commit();
+        graph.rollback();
+        graph.addVertexWithLabel(label);
+        graph.commit();
+        mgmt = graph.getManagementSystem();
+        VertexLabel vl = mgmt.getVertexLabel(label);
+        assertTrue(vl.isPartitioned());
+        mgmt.rollback();
+    }
 
     public static int getPartitionID(TitanVertex vertex, IDManager idManager) {
         long p = idManager.getPartitionId(vertex.getLongId());

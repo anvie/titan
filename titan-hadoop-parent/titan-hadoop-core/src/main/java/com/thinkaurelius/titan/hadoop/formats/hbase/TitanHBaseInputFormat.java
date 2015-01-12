@@ -7,6 +7,7 @@ import com.thinkaurelius.titan.hadoop.FaunusVertex;
 import com.thinkaurelius.titan.hadoop.formats.util.TitanInputFormat;
 import com.thinkaurelius.titan.diskstorage.hbase.HBaseStoreManager;
 
+import com.thinkaurelius.titan.hadoop.formats.util.input.TitanHadoopSetupCommon;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.hbase.HConstants;
 import org.apache.hadoop.hbase.client.Scan;
@@ -20,6 +21,8 @@ import org.apache.hadoop.mapreduce.InputSplit;
 import org.apache.hadoop.mapreduce.JobContext;
 import org.apache.hadoop.mapreduce.RecordReader;
 import org.apache.hadoop.mapreduce.TaskAttemptContext;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.lang.reflect.Method;
@@ -30,8 +33,10 @@ import java.util.List;
  */
 public class TitanHBaseInputFormat extends TitanInputFormat {
 
+    private static final Logger log =
+            LoggerFactory.getLogger(TitanHBaseInputFormat.class);
+
     private final TableInputFormat tableInputFormat = new TableInputFormat();
-    private TitanHBaseHadoopGraph graph;
     private byte[] edgestoreFamily;
 
     @Override
@@ -41,13 +46,12 @@ public class TitanHBaseInputFormat extends TitanInputFormat {
 
     @Override
     public RecordReader<NullWritable, FaunusVertex> createRecordReader(final InputSplit inputSplit, final TaskAttemptContext taskAttemptContext) throws IOException, InterruptedException {
-        return new TitanHBaseRecordReader(this.graph, this.vertexQuery, (TableRecordReader) this.tableInputFormat.createRecordReader(inputSplit, taskAttemptContext), edgestoreFamily);
+        return new TitanHBaseRecordReader(this, this.vertexQuery, (TableRecordReader) this.tableInputFormat.createRecordReader(inputSplit, taskAttemptContext), edgestoreFamily);
     }
 
     @Override
     public void setConf(final Configuration config) {
         super.setConf(config);
-        this.graph = new TitanHBaseHadoopGraph(titanSetup);
 
         //config.set(TableInputFormat.SCAN_COLUMN_FAMILY, Backend.EDGESTORE_NAME);
         config.set(TableInputFormat.INPUT_TABLE, inputConf.get(HBaseStoreManager.HBASE_TABLE));
@@ -56,8 +60,8 @@ public class TitanHBaseInputFormat extends TitanInputFormat {
 //        if (basicConf.get(TITAN_HADOOP_GRAPH_INPUT_TITAN_STORAGE_PORT, null) != null)
         if (inputConf.has(GraphDatabaseConfiguration.STORAGE_PORT))
             config.set(HConstants.ZOOKEEPER_CLIENT_PORT, String.valueOf(inputConf.get(GraphDatabaseConfiguration.STORAGE_PORT)));
-        // TODO: config.set("storage.read-only", "true");
         config.set("autotype", "none");
+        log.debug("hbase.security.authentication={}", config.get("hbase.security.authentication"));
         Scan scanner = new Scan();
         // TODO the mapping is private in HBaseStoreManager and leaks here -- replace String database/CF names with an enum where each value has both a short and long name
         if (inputConf.get(HBaseStoreManager.SHORT_CF_NAMES)) {
@@ -67,7 +71,8 @@ public class TitanHBaseInputFormat extends TitanInputFormat {
             scanner.addFamily(Backend.EDGESTORE_NAME.getBytes());
             edgestoreFamily = Bytes.toBytes(Backend.EDGESTORE_NAME);
         }
-        scanner.setFilter(getColumnFilter(titanSetup.inputSlice(this.vertexQuery)));
+        //scanner.setFilter(getColumnFilter(titanSetup.inputSlice(this.vertexQuery)));
+        scanner.setFilter(getColumnFilter(TitanHadoopSetupCommon.getDefaultSliceQuery()));
         //TODO (minor): should we set other options in http://hbase.apache.org/apidocs/org/apache/hadoop/hbase/client/Scan.html for optimization?
         Method converter;
         try {

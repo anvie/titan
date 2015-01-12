@@ -7,9 +7,11 @@ import com.google.common.base.Predicates;
 import com.google.common.collect.*;
 import com.thinkaurelius.titan.core.*;
 import com.thinkaurelius.titan.core.Cardinality;
-import com.thinkaurelius.titan.core.schema.ConsistencyModifier;
+import com.thinkaurelius.titan.core.schema.*;
 import com.thinkaurelius.titan.core.Multiplicity;
-import com.thinkaurelius.titan.core.schema.TitanManagement;
+import com.thinkaurelius.titan.diskstorage.configuration.Configuration;
+import com.thinkaurelius.titan.diskstorage.configuration.MergedConfiguration;
+import com.thinkaurelius.titan.diskstorage.util.StandardBaseTransactionConfig;
 import com.thinkaurelius.titan.diskstorage.util.StaticArrayEntry;
 import com.thinkaurelius.titan.diskstorage.log.Message;
 import com.thinkaurelius.titan.diskstorage.log.ReadMarker;
@@ -47,11 +49,12 @@ import com.thinkaurelius.titan.graphdb.transaction.StandardTransactionBuilder;
 import com.thinkaurelius.titan.graphdb.transaction.TransactionConfiguration;
 import com.thinkaurelius.titan.graphdb.types.CompositeIndexType;
 import com.thinkaurelius.titan.graphdb.types.MixedIndexType;
-import com.thinkaurelius.titan.core.schema.SchemaStatus;
 import com.thinkaurelius.titan.graphdb.types.system.BaseKey;
 import com.thinkaurelius.titan.graphdb.types.system.BaseRelationType;
 import com.thinkaurelius.titan.graphdb.types.vertices.TitanSchemaVertex;
 import com.thinkaurelius.titan.graphdb.util.ExceptionFactory;
+import com.thinkaurelius.titan.util.system.IOUtils;
+import com.thinkaurelius.titan.util.system.TXUtils;
 import com.tinkerpop.blueprints.Direction;
 import com.tinkerpop.blueprints.Features;
 
@@ -95,7 +98,7 @@ public class StandardTitanGraph extends TitanBlueprintsGraph {
     private final ManagementLogger mgmtLogger;
 
     //Shutdown hook
-    private final ShutdownThread shutdownHook;
+    private volatile ShutdownThread shutdownHook;
 
     private volatile boolean isOpen = true;
     private AtomicLong txCounter;
@@ -111,7 +114,8 @@ public class StandardTitanGraph extends TitanBlueprintsGraph {
 
         this.serializer = config.getSerializer();
         StoreFeatures storeFeatures = backend.getStoreFeatures();
-        this.indexSerializer = new IndexSerializer(this.serializer, this.backend.getIndexInformation(),storeFeatures.isDistributed() && storeFeatures.isKeyOrdered());
+        this.indexSerializer = new IndexSerializer(configuration.getConfiguration(), this.serializer,
+                this.backend.getIndexInformation(),storeFeatures.isDistributed() && storeFeatures.isKeyOrdered());
         this.edgeSerializer = new EdgeSerializer(this.serializer);
         this.vertexExistenceQuery = edgeSerializer.getQuery(BaseKey.VertexExists, Direction.OUT, new EdgeSerializer.TypedInterval[0]).setLimit(1);
         this.queryCache = new RelationQueryCache(this.edgeSerializer);
@@ -144,7 +148,20 @@ public class StandardTitanGraph extends TitanBlueprintsGraph {
     }
 
     @Override
+    public boolean isClosed() {
+        return !isOpen();
+    }
+
+    @Override
     public synchronized void shutdown() throws TitanException {
+        try {
+            shutdownInternal();
+        } finally {
+            removeHook();
+        }
+    }
+
+    private synchronized void shutdownInternal() throws TitanException {
         if (!isOpen) return;
         try {
             //Unregister instance
@@ -152,16 +169,29 @@ public class StandardTitanGraph extends TitanBlueprintsGraph {
             globalConfig.remove(REGISTRATION_TIME,config.getUniqueGraphId());
 
             super.shutdown();
+            IOUtils.closeQuietly(serializer);
             idAssigner.close();
             backend.close();
             queryCache.close();
-
-            // Remove shutdown hook to avoid reference retention
-            Runtime.getRuntime().removeShutdownHook(shutdownHook);
         } catch (BackendException e) {
             throw new TitanException("Could not close storage backend", e);
         } finally {
             isOpen = false;
+        }
+    }
+
+    private synchronized void removeHook() {
+        if (null == shutdownHook)
+            return;
+
+        ShutdownThread tmp = shutdownHook;
+        shutdownHook = null;
+
+        // Remove shutdown hook to avoid reference retention
+        try {
+            Runtime.getRuntime().removeShutdownHook(tmp);
+        } catch (IllegalStateException e) {
+            log.warn("Failed to remove shutdown hook", e);
         }
     }
 
@@ -261,20 +291,35 @@ public class StandardTitanGraph extends TitanBlueprintsGraph {
     private final SchemaCache.StoreRetrieval typeCacheRetrieval = new SchemaCache.StoreRetrieval() {
 
         @Override
-        public Long retrieveSchemaByName(String typeName, StandardTitanTx tx) {
-            tx.getTxHandle().disableCache(); //Disable cache to make sure that schema is only cached once and cache eviction works!
-            TitanVertex v = Iterables.getOnlyElement(tx.getVertices(BaseKey.SchemaName, typeName),null);
-            tx.getTxHandle().enableCache();
-            return v!=null?v.getLongId():null;
+        public Long retrieveSchemaByName(String typeName) {
+            // Get a consistent tx
+            Configuration customTxOptions = backend.getStoreFeatures().getKeyConsistentTxConfig();
+            StandardTitanTx consistentTx = null;
+            try {
+                consistentTx = StandardTitanGraph.this.newTransaction(new StandardTransactionBuilder(getConfiguration(),
+                        StandardTitanGraph.this, customTxOptions).setGroupName(GraphDatabaseConfiguration.METRICS_SCHEMA_PREFIX_DEFAULT));
+                consistentTx.getTxHandle().disableCache();
+                TitanVertex v = Iterables.getOnlyElement(consistentTx.getVertices(BaseKey.SchemaName, typeName), null);
+                return v!=null?v.getLongId():null;
+            } finally {
+                TXUtils.rollbackQuietly(consistentTx);
+            }
         }
 
         @Override
-        public EntryList retrieveSchemaRelations(final long schemaId, final BaseRelationType type, final Direction dir, final StandardTitanTx tx) {
+        public EntryList retrieveSchemaRelations(final long schemaId, final BaseRelationType type, final Direction dir) {
             SliceQuery query = queryCache.getQuery(type,dir);
-            tx.getTxHandle().disableCache(); //Disable cache to make sure that schema is only cached once!
-            EntryList result = edgeQuery(schemaId, query, tx.getTxHandle());
-            tx.getTxHandle().enableCache();
-            return result;
+            Configuration customTxOptions = backend.getStoreFeatures().getKeyConsistentTxConfig();
+            StandardTitanTx consistentTx = null;
+            try {
+                consistentTx = StandardTitanGraph.this.newTransaction(new StandardTransactionBuilder(getConfiguration(),
+                        StandardTitanGraph.this, customTxOptions).setGroupName(GraphDatabaseConfiguration.METRICS_SCHEMA_PREFIX_DEFAULT));
+                consistentTx.getTxHandle().disableCache();
+                EntryList result = edgeQuery(schemaId, query, consistentTx.getTxHandle());
+                return result;
+            } finally {
+                TXUtils.rollbackQuietly(consistentTx);
+            }
         }
 
     };
@@ -708,7 +753,7 @@ public class StandardTitanGraph extends TitanBlueprintsGraph {
             if (graph.isOpen && log.isDebugEnabled())
                 log.debug("Shutting down graph {} using built-in shutdown hook.", graph);
 
-            graph.shutdown();
+            graph.shutdownInternal();
         }
     }
 }

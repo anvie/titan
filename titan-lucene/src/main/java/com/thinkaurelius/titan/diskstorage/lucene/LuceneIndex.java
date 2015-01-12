@@ -17,6 +17,7 @@ import com.thinkaurelius.titan.graphdb.configuration.GraphDatabaseConfiguration;
 import com.thinkaurelius.titan.graphdb.database.serialize.AttributeUtil;
 import com.thinkaurelius.titan.graphdb.query.TitanPredicate;
 import com.thinkaurelius.titan.graphdb.query.condition.*;
+import com.thinkaurelius.titan.util.system.IOUtils;
 import com.tinkerpop.pipes.util.structures.Pair;
 import org.apache.commons.io.FileUtils;
 import org.apache.commons.lang.StringUtils;
@@ -59,7 +60,7 @@ public class LuceneIndex implements IndexProvider {
     private static final int MAX_STRING_FIELD_LEN = 256;
 
     private static final Version LUCENE_VERSION = Version.LUCENE_41;
-    private static final IndexFeatures LUCENE_FEATURES = new IndexFeatures.Builder().build();
+    private static final IndexFeatures LUCENE_FEATURES = new IndexFeatures.Builder().supportedStringMappings(Mapping.TEXT, Mapping.STRING).build();
 
     private static final int GEO_MAX_LEVELS = 11;
 
@@ -142,51 +143,60 @@ public class LuceneIndex implements IndexProvider {
         writerLock.lock();
         try {
             for (Map.Entry<String, Map<String, IndexMutation>> stores : mutations.entrySet()) {
-                String storename = stores.getKey();
-                IndexWriter writer = getWriter(storename);
-                IndexReader reader = DirectoryReader.open(writer, true);
-                IndexSearcher searcher = new IndexSearcher(reader);
-                for (Map.Entry<String, IndexMutation> entry : stores.getValue().entrySet()) {
-                    String docid = entry.getKey();
-                    IndexMutation mutation = entry.getValue();
-
-                    if (mutation.isDeleted()) {
-                        if (log.isTraceEnabled())
-                            log.trace("Deleted entire document [{}]", docid);
-
-                        writer.deleteDocuments(new Term(DOCID, docid));
-                        continue;
-                    }
-
-                    Pair<Document, Map<String, Shape>> docAndGeo = retrieveOrCreate(docid, searcher);
-                    Document doc = docAndGeo.getA();
-                    Map<String, Shape> geofields = docAndGeo.getB();
-
-                    Preconditions.checkNotNull(doc);
-                    for (IndexEntry del : mutation.getDeletions()) {
-                        Preconditions.checkArgument(!del.hasMetaData(),"Lucene index does not support indexing meta data: %s",del);
-                        String key = del.field;
-                        if (doc.getField(key) != null) {
-                            if (log.isTraceEnabled())
-                                log.trace("Removing field [{}] on document [{}]", key, docid);
-
-                            doc.removeFields(key);
-                            geofields.remove(key);
-                        }
-                    }
-
-                    addToDocument(storename, docid, doc, mutation.getAdditions(), geofields, informations);
-
-                    //write the old document to the index with the modifications
-                    writer.updateDocument(new Term(DOCID, docid), doc);
-                }
-                writer.commit();
+                mutateStores(stores, informations);
             }
             ltx.postCommit();
         } catch (IOException e) {
             throw new TemporaryBackendException("Could not update Lucene index", e);
         } finally {
             writerLock.unlock();
+        }
+    }
+
+    private void mutateStores(Map.Entry<String, Map<String, IndexMutation>> stores, KeyInformation.IndexRetriever informations) throws IOException, BackendException {
+        IndexReader reader = null;
+        try {
+            String storename = stores.getKey();
+            IndexWriter writer = getWriter(storename);
+            reader = DirectoryReader.open(writer, true);
+            IndexSearcher searcher = new IndexSearcher(reader);
+            for (Map.Entry<String, IndexMutation> entry : stores.getValue().entrySet()) {
+                String docid = entry.getKey();
+                IndexMutation mutation = entry.getValue();
+
+                if (mutation.isDeleted()) {
+                    if (log.isTraceEnabled())
+                        log.trace("Deleted entire document [{}]", docid);
+
+                    writer.deleteDocuments(new Term(DOCID, docid));
+                    continue;
+                }
+
+                Pair<Document, Map<String, Shape>> docAndGeo = retrieveOrCreate(docid, searcher);
+                Document doc = docAndGeo.getA();
+                Map<String, Shape> geofields = docAndGeo.getB();
+
+                Preconditions.checkNotNull(doc);
+                for (IndexEntry del : mutation.getDeletions()) {
+                    Preconditions.checkArgument(!del.hasMetaData(), "Lucene index does not support indexing meta data: %s", del);
+                    String key = del.field;
+                    if (doc.getField(key) != null) {
+                        if (log.isTraceEnabled())
+                            log.trace("Removing field [{}] on document [{}]", key, docid);
+
+                        doc.removeFields(key);
+                        geofields.remove(key);
+                    }
+                }
+
+                addToDocument(storename, docid, doc, mutation.getAdditions(), geofields, informations);
+
+                //write the old document to the index with the modifications
+                writer.updateDocument(new Term(DOCID, docid), doc);
+            }
+            writer.commit();
+        } finally {
+            IOUtils.closeQuietly(reader);
         }
     }
 
@@ -341,14 +351,21 @@ public class LuceneIndex implements IndexProvider {
     @Override
     public List<String> query(IndexQuery query, KeyInformation.IndexRetriever informations, BaseTransaction tx) throws BackendException {
         //Construct query
-        Filter q = convertQuery(query.getCondition(),informations.get(query.getStore()));
+        SearchParams searchParams = convertQuery(query.getCondition(),informations.get(query.getStore()));
 
         try {
             IndexSearcher searcher = ((Transaction) tx).getSearcher(query.getStore());
             if (searcher == null) return ImmutableList.of(); //Index does not yet exist
+
+            Query q = searchParams.getQuery();
+            if (null == q)
+                q = new MatchAllDocsQuery();
+
+            final Filter f = searchParams.getFilter();
+
             long time = System.currentTimeMillis();
-            TopDocs docs = searcher.search(new MatchAllDocsQuery(), q, query.hasLimit() ? query.getLimit() : Integer.MAX_VALUE - 1, getSortOrder(query));
-            log.debug("Executed query [{}] in {} ms", q, System.currentTimeMillis() - time);
+            TopDocs docs = searcher.search(q, f, query.hasLimit() ? query.getLimit() : Integer.MAX_VALUE - 1, getSortOrder(query));
+            log.debug("Executed query [{}] and filter [{}] in {} ms", q, f, System.currentTimeMillis() - time);
             List<String> result = new ArrayList<String>(docs.scoreDocs.length);
             for (int i = 0; i < docs.scoreDocs.length; i++) {
                 result.add(searcher.doc(docs.scoreDocs[i].doc).getField(DOCID).stringValue());
@@ -362,12 +379,12 @@ public class LuceneIndex implements IndexProvider {
     private static final Filter numericFilter(String key, Cmp relation, Number value) {
         switch (relation) {
             case EQUAL:
-                return (value instanceof Long || value instanceof Integer) ?
+                return AttributeUtil.isWholeNumber(value) ?
                         NumericRangeFilter.newLongRange(key, value.longValue(), value.longValue(), true, true) :
                         NumericRangeFilter.newDoubleRange(key, value.doubleValue(), value.doubleValue(), true, true);
             case NOT_EQUAL:
                 BooleanFilter q = new BooleanFilter();
-                if (value instanceof Long || value instanceof Integer) {
+                if (AttributeUtil.isWholeNumber(value)) {
                     q.add(NumericRangeFilter.newLongRange(key, Long.MIN_VALUE, value.longValue(), true, false), BooleanClause.Occur.SHOULD);
                     q.add(NumericRangeFilter.newLongRange(key, value.longValue(), Long.MAX_VALUE, false, true), BooleanClause.Occur.SHOULD);
                 } else {
@@ -376,19 +393,19 @@ public class LuceneIndex implements IndexProvider {
                 }
                 return q;
             case LESS_THAN:
-                return (value instanceof Long || value instanceof Integer) ?
+                return (AttributeUtil.isWholeNumber(value)) ?
                         NumericRangeFilter.newLongRange(key, Long.MIN_VALUE, value.longValue(), true, false) :
                         NumericRangeFilter.newDoubleRange(key, Double.MIN_VALUE, value.doubleValue(), true, false);
             case LESS_THAN_EQUAL:
-                return (value instanceof Long || value instanceof Integer) ?
+                return (AttributeUtil.isWholeNumber(value)) ?
                         NumericRangeFilter.newLongRange(key, Long.MIN_VALUE, value.longValue(), true, true) :
                         NumericRangeFilter.newDoubleRange(key, Double.MIN_VALUE, value.doubleValue(), true, true);
             case GREATER_THAN:
-                return (value instanceof Long || value instanceof Integer) ?
+                return (AttributeUtil.isWholeNumber(value)) ?
                         NumericRangeFilter.newLongRange(key, value.longValue(), Long.MAX_VALUE, false, true) :
                         NumericRangeFilter.newDoubleRange(key, value.doubleValue(), Double.MAX_VALUE, false, true);
             case GREATER_THAN_EQUAL:
-                return (value instanceof Long || value instanceof Integer) ?
+                return (AttributeUtil.isWholeNumber(value)) ?
                         NumericRangeFilter.newLongRange(key, value.longValue(), Long.MAX_VALUE, true, true) :
                         NumericRangeFilter.newDoubleRange(key, value.doubleValue(), Double.MAX_VALUE, true, true);
             default:
@@ -396,7 +413,8 @@ public class LuceneIndex implements IndexProvider {
         }
     }
 
-    private final Filter convertQuery(Condition<?> condition, KeyInformation.StoreRetriever informations) {
+    private final SearchParams convertQuery(Condition<?> condition, KeyInformation.StoreRetriever informations) {
+        SearchParams params = new SearchParams();
         if (condition instanceof PredicateCondition) {
             PredicateCondition<String, ?> atom = (PredicateCondition) condition;
             Object value = atom.getValue();
@@ -405,7 +423,7 @@ public class LuceneIndex implements IndexProvider {
             if (value instanceof Number) {
                 Preconditions.checkArgument(titanPredicate instanceof Cmp, "Relation not supported on numeric types: " + titanPredicate);
                 Preconditions.checkArgument(value instanceof Number);
-                return numericFilter(key, (Cmp) titanPredicate, (Number) value);
+                params.addFilter(numericFilter(key, (Cmp) titanPredicate, (Number) value));
             } else if (value instanceof String) {
                 Mapping map = Mapping.getMapping(informations.get(key));
                 if ((map==Mapping.DEFAULT || map==Mapping.TEXT) && !titanPredicate.toString().startsWith("CONTAINS"))
@@ -413,48 +431,57 @@ public class LuceneIndex implements IndexProvider {
                 if (map==Mapping.STRING && titanPredicate.toString().startsWith("CONTAINS"))
                     throw new IllegalArgumentException("String mapped string values do not support CONTAINS queries: " + titanPredicate);
 
+
+
                 if (titanPredicate == Text.CONTAINS) {
                     value = ((String) value).toLowerCase();
-                    return new TermsFilter(new Term(key, (String) value));
+                    BooleanFilter b = new BooleanFilter();
+                    for (String term : Text.tokenize((String)value)) {
+                        b.add(new TermsFilter(new Term(key, term)), BooleanClause.Occur.MUST);
+                    }
+                    params.addFilter(b);
                 } else if (titanPredicate == Text.CONTAINS_PREFIX) {
                     value = ((String) value).toLowerCase();
-                    return new PrefixFilter(new Term(key, (String) value));
+                    params.addFilter(new PrefixFilter(new Term(key, (String) value)));
                 } else if (titanPredicate == Text.PREFIX) {
-                    return new PrefixFilter(new Term(key, (String) value));
-//                } else if (titanPredicate == Text.CONTAINS_REGEX) {
-//                    value = ((String) value).toLowerCase();
-//                    return new RegexpQuery(new Term(key,(String)value));
+                    params.addFilter(new PrefixFilter(new Term(key, (String) value)));
+                } else if (titanPredicate == Text.REGEX) {
+                    RegexpQuery rq = new RegexpQuery(new Term(key, (String) value));
+                    params.addQuery(rq);
+                } else if (titanPredicate == Text.CONTAINS_REGEX) {
+                    // This is terrible -- there is probably a better way
+                    RegexpQuery rq = new RegexpQuery(new Term(key, ".*" + (value) + ".*"));
+                    params.addQuery(rq);
                 } else if (titanPredicate == Cmp.EQUAL) {
-                    return new TermsFilter(new Term(key,(String)value));
+                    params.addFilter(new TermsFilter(new Term(key,(String)value)));
                 } else if (titanPredicate == Cmp.NOT_EQUAL) {
                     BooleanFilter q = new BooleanFilter();
-                    q.add(new TermsFilter(new Term(key,(String)value)), BooleanClause.Occur.MUST_NOT);
-                    return q;
+                    q.add(new TermsFilter(new Term(key, (String) value)), BooleanClause.Occur.MUST_NOT);
+                    params.addFilter(q);
                 } else
                     throw new IllegalArgumentException("Relation is not supported for string value: " + titanPredicate);
             } else if (value instanceof Geoshape) {
                 Preconditions.checkArgument(titanPredicate == Geo.WITHIN, "Relation is not supported for geo value: " + titanPredicate);
                 Shape shape = ((Geoshape) value).convert2Spatial4j();
                 SpatialArgs args = new SpatialArgs(SpatialOperation.IsWithin, shape);
-                return getSpatialStrategy(key).makeFilter(args);
+                params.addFilter(getSpatialStrategy(key).makeFilter(args));
             } else throw new IllegalArgumentException("Unsupported type: " + value);
         } else if (condition instanceof Not) {
-            BooleanFilter q = new BooleanFilter();
-            q.add(convertQuery(((Not) condition).getChild(),informations), BooleanClause.Occur.MUST_NOT);
-            return q;
+            SearchParams childParams = convertQuery(((Not) condition).getChild(), informations);
+            params.addParams(childParams, BooleanClause.Occur.MUST_NOT);
         } else if (condition instanceof And) {
-            BooleanFilter q = new BooleanFilter();
             for (Condition c : condition.getChildren()) {
-                q.add(convertQuery(c,informations), BooleanClause.Occur.MUST);
+                SearchParams childParams = convertQuery(c, informations);
+                params.addParams(childParams, BooleanClause.Occur.MUST);
             }
-            return q;
         } else if (condition instanceof Or) {
-            BooleanFilter q = new BooleanFilter();
             for (Condition c : condition.getChildren()) {
-                q.add(convertQuery(c,informations), BooleanClause.Occur.SHOULD);
+                SearchParams childParams = convertQuery(c, informations);
+                params.addParams(childParams, BooleanClause.Occur.SHOULD);
             }
-            return q;
         } else throw new IllegalArgumentException("Invalid condition: " + condition);
+
+        return params;
     }
 
     @Override
@@ -510,7 +537,7 @@ public class LuceneIndex implements IndexProvider {
                 case TEXT:
                     return titanPredicate == Text.CONTAINS || titanPredicate == Text.CONTAINS_PREFIX; // || titanPredicate == Text.CONTAINS_REGEX;
                 case STRING:
-                    return titanPredicate == Cmp.EQUAL || titanPredicate==Cmp.NOT_EQUAL || titanPredicate==Text.PREFIX; //  || titanPredicate==Text.REGEX
+                    return titanPredicate == Cmp.EQUAL || titanPredicate==Cmp.NOT_EQUAL || titanPredicate==Text.PREFIX || titanPredicate==Text.REGEX;
             }
         }
         return false;
@@ -527,6 +554,12 @@ public class LuceneIndex implements IndexProvider {
             if (mapping==Mapping.DEFAULT || mapping==Mapping.STRING || mapping==Mapping.TEXT) return true;
         }
         return false;
+    }
+
+    @Override
+    public String mapKey2Field(String key, KeyInformation information) {
+        Preconditions.checkArgument(!StringUtils.containsAny(key,new char[]{' '}),"Invalid key name provided: %s",key);
+        return key;
     }
 
     @Override
@@ -611,4 +644,55 @@ public class LuceneIndex implements IndexProvider {
         }
     }
 
+    /**
+     * Encapsulates a Lucene Query and Filter object pair that jointly express a Titan
+     * {@link com.thinkaurelius.titan.graphdb.query.Query} using Lucene's abstractions.
+     * This object's state is mutable.
+     */
+    private static class SearchParams {
+        private BooleanQuery q = new BooleanQuery();
+        private BooleanFilter f = new BooleanFilter();
+
+        private void addFilter(Filter newFilter) {
+            addFilter(newFilter, BooleanClause.Occur.MUST);
+        }
+
+        private void addFilter(Filter newFilter, BooleanClause.Occur occur) {
+            f.add(newFilter, occur);
+        }
+
+        private void addQuery(Query newQuery) {
+            addQuery(newQuery, BooleanClause.Occur.MUST);
+        }
+
+        private void addQuery(Query newQuery, BooleanClause.Occur occur) {
+            q.add(newQuery, occur);
+        }
+
+        private void addParams(SearchParams other, BooleanClause.Occur occur) {
+            Query otherQuery = other.getQuery();
+            if (null != otherQuery)
+                addQuery(otherQuery, occur);
+
+            Filter otherFilter = other.getFilter();
+            if (null != otherFilter)
+                addFilter(otherFilter, occur);
+        }
+
+        private Query getQuery() {
+            if (0 == q.clauses().size()) {
+                return null;
+            } else {
+                return q;
+            }
+        }
+
+        private Filter getFilter() {
+            if (0 == f.clauses().size()) {
+                return null;
+            } else {
+                return f;
+            }
+        }
+    }
 }

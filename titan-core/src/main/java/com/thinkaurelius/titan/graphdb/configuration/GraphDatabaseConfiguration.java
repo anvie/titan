@@ -1,12 +1,18 @@
 package com.thinkaurelius.titan.graphdb.configuration;
 
+import com.google.common.base.Joiner;
 import com.google.common.collect.Maps;
+import com.google.common.collect.Sets;
 import com.thinkaurelius.titan.core.*;
 import com.thinkaurelius.titan.core.attribute.AttributeHandler;
 import com.thinkaurelius.titan.core.attribute.Duration;
 import com.thinkaurelius.titan.core.schema.DefaultSchemaMaker;
+import com.thinkaurelius.titan.diskstorage.StandardIndexProvider;
+import com.thinkaurelius.titan.diskstorage.StandardStoreManager;
 import com.thinkaurelius.titan.diskstorage.keycolumnvalue.ttl.TTLKVCSManager;
 import com.thinkaurelius.titan.graphdb.blueprints.BlueprintsDefaultSchemaMaker;
+import com.thinkaurelius.titan.graphdb.database.management.ManagementSystem;
+import com.thinkaurelius.titan.graphdb.database.serialize.kryo.KryoInstanceCacheImpl;
 import com.thinkaurelius.titan.graphdb.types.typemaker.DisableDefaultSchemaMaker;
 import com.thinkaurelius.titan.util.stats.NumberUtil;
 import com.thinkaurelius.titan.diskstorage.util.time.*;
@@ -78,19 +84,39 @@ public class GraphDatabaseConfiguration {
     // ################################################
 
     public static final ConfigNamespace GRAPH_NS = new ConfigNamespace(ROOT_NS,"graph",
-            "Configuration options for transaction handling");
-
+            "General configuration options");
 
     public static final ConfigOption<Boolean> ALLOW_SETTING_VERTEX_ID = new ConfigOption<Boolean>(GRAPH_NS,"set-vertex-id",
             "Whether user provided vertex ids should be enabled and Titan's automatic id allocation be disabled. " +
-                "Useful when operating Titan in concert with another storage system that assigns long ids but disables some" +
-                    "of Titan's advanced features which can lead to inconsistent data. EXPERT FEATURE - USE WITH GREAT CARE.",
+            "Useful when operating Titan in concert with another storage system that assigns long ids but disables some " +
+            "of Titan's advanced features which can lead to inconsistent data. EXPERT FEATURE - USE WITH GREAT CARE.",
             ConfigOption.Type.FIXED, false);
 
     public static final ConfigOption<Timestamps> TIMESTAMP_PROVIDER = new ConfigOption<Timestamps>(GRAPH_NS, "timestamps",
-            "The timestamp resolution to use when writing to storage and indices. Sets the time source for the entire graph cluster. " +
-                    "To avoid potential inaccuracies the configured time resolution should match those of the backend systems",
+            "The timestamp resolution to use when writing to storage and indices. Sets the time granularity for the " +
+            "entire graph cluster. To avoid potential inaccuracies, the configured time resolution should match " +
+            "those of the backend systems. Some Titan storage backends declare a preferred timestamp resolution that " +
+            "reflects design constraints in the underlying service. When the backend provides " +
+            "a preferred default, and when this setting is not explicitly declared in the config file, the backend " +
+            "default is used and the general default associated with this setting is ignored.  An explicit " +
+            "declaration of this setting overrides both the general and backend-specific defaults.",
             ConfigOption.Type.FIXED, Timestamps.class, Timestamps.MICRO);
+
+    public static final ConfigOption<KryoInstanceCacheImpl> KRYO_INSTANCE_CACHE = new ConfigOption<KryoInstanceCacheImpl>(GRAPH_NS, "kryo-instance-cache",
+            "Controls how Kryo instances are created and cached.  Kryo instances are not " +
+            "safe for concurrent access.  Titan is responsible guaranteeing that concurrent threads use separate " +
+            "Kryo instances.  Titan defaults to a Kryo caching approach based on ThreadLocal, as recommended by the " +
+            "Kryo documentation (https://github.com/EsotericSoftware/kryo#threading).  " +
+            "However, these ThreadLocals are not necessarily removed when Titan shuts down.  When Titan runs on an " +
+            "externally-controlled thread pool that reuses threads indefinitely, such as that provided by Tomcat, " +
+            "these unremoved ThreadLocals can potentially cause unintended reference retention for as long as the " +
+            "affected threads remain alive.  In that type of execution environment, consider setting this to " +
+            "CONCURRENT_HASH_MAP.  The CHM implementation releases all references when Titan is shutdown, but it " +
+            "also subject to some synchronization-related performance overhead that the ThreadLocal-based default " +
+            "implementation avoids.  Recent versions of Kryo include a class called KryoPool that offers another way " +
+            "to solve this problem.  However, KryoPool is not supported in Titan 0.5.x because the version of Kryo " +
+            "used by Titan 0.5.x predates KryoPool's introduction.",
+            ConfigOption.Type.MASKABLE, KryoInstanceCacheImpl.class, KryoInstanceCacheImpl.THREAD_LOCAL);
 
     public static final ConfigOption<String> UNIQUE_INSTANCE_ID = new ConfigOption<String>(GRAPH_NS,"unique-instance-id",
             "Unique identifier for this Titan instance.  This must be unique among all instances " +
@@ -110,6 +136,16 @@ public class GraphDatabaseConfiguration {
     public static final ConfigOption<String> INITIAL_TITAN_VERSION = new ConfigOption<String>(GRAPH_NS,"titan-version",
             "The version of Titan with which this database was created. Automatically set on first start. Don't manually set this property.",
             ConfigOption.Type.FIXED, String.class).hide();
+
+    public static final ConfigOption<Boolean> ALLOW_STALE_CONFIG = new ConfigOption<Boolean>(GRAPH_NS,"allow-stale-config",
+            "Whether to allow the local and storage-backend-hosted copies of the configuration to contain conflicting values for " +
+            "options with any of the following types: " + Joiner.on(", ").join(ConfigOption.getManagedTypes()) + ".  " +
+            "These types are managed globally through the storage backend and cannot be overridden by changing the " +
+            "local configuration.  This type of conflict usually indicates misconfiguration.  When this option is true, " +
+            "Titan will log these option conflicts, but continue normal operation using the storage-backend-hosted value " +
+            "for each conflicted option.  When this option is false, Titan will log these option conflicts, but then it " +
+            "will throw an exception, refusing to start.",
+            ConfigOption.Type.MASKABLE, Boolean.class, true);
 
     // ################ INSTANCE REGISTRATION (system) #######################
     // ##############################################################
@@ -138,6 +174,13 @@ public class GraphDatabaseConfiguration {
             ConfigOption.Type.GLOBAL, new StandardDuration(10, TimeUnit.SECONDS));
 
 
+    public static final ConfigNamespace TRANSACTION_RECOVERY_NS = new ConfigNamespace(TRANSACTION_NS,"recovery",
+            "Configuration options for transaction recovery processes");
+
+    public static final ConfigOption<Boolean> VERBOSE_TX_RECOVERY = new ConfigOption<Boolean>(TRANSACTION_RECOVERY_NS,"verbose",
+            "Whether the transaction recovery system should print recovered transactions and other activity to standard output",
+            ConfigOption.Type.MASKABLE, false);
+
     // ################ Query Processing #######################
     // ################################################
 
@@ -163,6 +206,11 @@ public class GraphDatabaseConfiguration {
                     "property access for the same vertex at the expense of retrieving all properties at once. This can be " +
                     "expensive for vertices with many properties",
             ConfigOption.Type.MASKABLE, Boolean.class);
+
+    public static final ConfigOption<Boolean> ADJUST_LIMIT = new ConfigOption<Boolean>(QUERY_NS,"smart-limit",
+            "Whether the query optimizer should try to guess a smart limit for the query to ensure responsiveness in " +
+                    "light of possibly large result sets. Those will be loaded incrementally if this option is enabled.",
+            ConfigOption.Type.MASKABLE, true);
 
     // ################ SCHEMA #######################
     // ################################################
@@ -221,7 +269,7 @@ public class GraphDatabaseConfiguration {
 //    public static final String DB_CACHE_CLEAN_WAIT_KEY = "db-cache-clean-wait";
 //    public static final long DB_CACHE_CLEAN_WAIT_DEFAULT = 50;
     public static final ConfigOption<Integer> DB_CACHE_CLEAN_WAIT = new ConfigOption<Integer>(CACHE_NS,"db-cache-clean-wait",
-            "How long, in milliseconds, database-level cache will keep entries after flushing them." +
+            "How long, in milliseconds, database-level cache will keep entries after flushing them.  " +
             "This option is only useful on distributed storage backends that are capable of acknowledging writes " +
             "without necessarily making them immediately visible.",
             ConfigOption.Type.GLOBAL_OFFLINE, 50);
@@ -237,7 +285,8 @@ public class GraphDatabaseConfiguration {
     public static final ConfigOption<Long> DB_CACHE_TIME = new ConfigOption<Long>(CACHE_NS,"db-cache-time",
             "Default expiration time, in milliseconds, for entries in the database-level cache. " +
             "Entries are evicted when they reach this age even if the cache has room to spare. " +
-            "Set to 0 to disable expiration (cache entries live forever).",
+            "Set to 0 to disable expiration (cache entries live forever or until memory pressure " +
+            "triggers eviction when set to 0).",
             ConfigOption.Type.GLOBAL_OFFLINE, 10000l);
 
     /**
@@ -304,7 +353,7 @@ public class GraphDatabaseConfiguration {
      * require/support a separate config file
      */
     public static final ConfigOption<String> STORAGE_CONF_FILE = new ConfigOption<String>(STORAGE_NS,"conf-file",
-            "Path to a configuration file for those storage backends that require/support a separate config file",
+            "Path to a configuration file for those storage backends which require/support a single separate config file.",
             ConfigOption.Type.LOCAL, String.class);
 //    public static final String STORAGE_CONF_FILE_KEY = "conffile";
 
@@ -312,8 +361,10 @@ public class GraphDatabaseConfiguration {
      * Define the storage backed to use for persistence
      */
     public static final ConfigOption<String> STORAGE_BACKEND = new ConfigOption<String>(STORAGE_NS,"backend",
-            "Either the package and classname of a StoreManager implementation or one of " +
-            "Titan's built-in shorthand names for its standard storage backends.",
+            "The primary persistence provider used by Titan.  This is required.  It should be set one of " +
+            "Titan's built-in shorthand names for its standard storage backends " +
+            "(shorthands: " + Joiner.on(", ").join(StandardStoreManager.getAllShorthands()) + ") " +
+            "or to the full package and classname of a custom/third-party StoreManager implementation.",
             ConfigOption.Type.LOCAL, String.class);
 //    public static final String STORAGE_BACKEND_KEY = "backend";
 //    public static final String STORAGE_BACKEND_DEFAULT = "local";
@@ -411,7 +462,8 @@ public class GraphDatabaseConfiguration {
 //    public static final String INSTANCE_RID_RAW_KEY = "machine-id";
 
     public static final ConfigOption<String[]> STORAGE_HOSTS = new ConfigOption<String[]>(STORAGE_NS,"hostname",
-            "Configuration key for the hostname or list of hostname of remote storage backend servers to connect to",
+            "The hostname or comma-separated list of hostnames of storage backend servers.  " +
+            "This is only applicable to some storage backends, such as cassandra and hbase.",
             ConfigOption.Type.LOCAL, new String[]{NetworkUtil.getLoopbackAddress()});
 
     /**
@@ -420,7 +472,7 @@ public class GraphDatabaseConfiguration {
      * Value = {@value}
      */
     public static final ConfigOption<Integer> STORAGE_PORT = new ConfigOption<Integer>(STORAGE_NS,"port",
-            "Configuration key for the port on which to connect to remote storage backend servers",
+            "The port on which to connect to storage backend servers.",
             ConfigOption.Type.LOCAL, Integer.class);
 
     /**
@@ -735,25 +787,33 @@ public class GraphDatabaseConfiguration {
      * Define the indexing backed to use for index support
      */
     public static final ConfigOption<String> INDEX_BACKEND = new ConfigOption<String>(INDEX_NS,"backend",
-            "Define the indexing backed to use for index support",
+            "The indexing backend used to extend and optimize Titan's query functionality. " +
+            "This setting is optional.  Titan can use multiple heterogeneous index backends.  " +
+            "Hence, this option can appear more than once, so long as the user-defined name between " +
+            "\"" + INDEX_NS.getName() + "\" and \"backend\" is unique among appearances." +
+            "Similar to the storage backend, this should be set to one of " +
+            "Titan's built-in shorthand names for its standard index backends " +
+            "(shorthands: " + Joiner.on(", ").join(StandardIndexProvider.getAllShorthands()) + ") " +
+            "or to the full package and classname of a custom/third-party IndexProvider implementation.",
             ConfigOption.Type.GLOBAL_OFFLINE, "elasticsearch");
 //    public static final String INDEX_BACKEND_KEY = "backend";
 //    public static final String INDEX_BACKEND_DEFAULT = "lucene";
 
     public static final ConfigOption<String> INDEX_DIRECTORY = new ConfigOption<String>(INDEX_NS,"directory",
             "Directory to store index data locally",
-            ConfigOption.Type.GLOBAL_OFFLINE, String.class);
+            ConfigOption.Type.MASKABLE, String.class);
 
     public static final ConfigOption<String> INDEX_NAME = new ConfigOption<String>(INDEX_NS,"index-name",
             "Name of the index if required by the indexing backend",
             ConfigOption.Type.GLOBAL_OFFLINE, "titan");
 
     public static final ConfigOption<String[]> INDEX_HOSTS = new ConfigOption<String[]>(INDEX_NS,"hostname",
-            "Hostname of the indexing backend",
-            ConfigOption.Type.GLOBAL, new String[]{NetworkUtil.getLoopbackAddress()});
+            "The hostname or comma-separated list of hostnames of index backend servers.  " +
+            "This is only applicable to some index backends, such as elasticsearch and solr.",
+            ConfigOption.Type.MASKABLE, new String[]{NetworkUtil.getLoopbackAddress()});
 
     public static final ConfigOption<Integer> INDEX_PORT = new ConfigOption<Integer>(INDEX_NS,"port",
-            "Configuration key for the port on which to connect to remote indexing backend servers",
+            "The port on which to connect to index backend servers",
             ConfigOption.Type.MASKABLE, Integer.class);
 
     public static final ConfigOption<String> INDEX_CONF_FILE = new ConfigOption<String>(INDEX_NS,"conf-file",
@@ -763,6 +823,11 @@ public class GraphDatabaseConfiguration {
     public static final ConfigOption<Integer> INDEX_MAX_RESULT_SET_SIZE = new ConfigOption<Integer>(INDEX_NS, "max-result-set-size",
             "Maxium number of results to return if no limit is specified",
             ConfigOption.Type.MASKABLE, 100000);
+
+    public static final ConfigOption<Boolean> INDEX_NAME_MAPPING = new ConfigOption<Boolean>(INDEX_NS,"map-name",
+            "Whether to use the name of the property key as the field name in the index. It must be ensured, that the" +
+                    "indexed property key names are valid field names. Renaming the property key will NOT rename the field.",
+            ConfigOption.Type.GLOBAL, false);
 
 
     // ############## Logging System ######################
@@ -871,6 +936,7 @@ public class GraphDatabaseConfiguration {
      */
     public static final String METRICS_PREFIX_DEFAULT = "com.thinkaurelius.titan";
     public static final String METRICS_SYSTEM_PREFIX_DEFAULT = METRICS_PREFIX_DEFAULT + "." + "sys";
+    public static final String METRICS_SCHEMA_PREFIX_DEFAULT = METRICS_SYSTEM_PREFIX_DEFAULT + "." + "schema";
 
     /**
      * The default name prefix for Metrics reported by Titan. All metric names
@@ -1191,6 +1257,7 @@ public class GraphDatabaseConfiguration {
     private int txDirtyVertexSize;
     private DefaultSchemaMaker defaultSchemaMaker;
     private Boolean propertyPrefetching;
+    private boolean adjustQueryLimit;
     private boolean allowVertexIdSetting;
     private boolean logTransactions;
     private String metricsPrefix;
@@ -1221,26 +1288,20 @@ public class GraphDatabaseConfiguration {
             ModifiableConfiguration globalWrite = new ModifiableConfiguration(ROOT_NS,kcvsConfig, BasicConfiguration.Restriction.GLOBAL);
             if (!globalWrite.isFrozen()) {
                 //Copy over global configurations
-                Map<ConfigElement.PathIdentifier,Object> allOptions = localbc.getAll();
-                globalWrite.setAll(Maps.filterEntries(allOptions,new Predicate<Map.Entry<ConfigElement.PathIdentifier, Object>>() {
-                    @Override
-                    public boolean apply(@Nullable Map.Entry<ConfigElement.PathIdentifier, Object> entry) {
-                        assert entry.getKey().element.isOption();
-                        return ((ConfigOption)entry.getKey().element).isGlobal();
-                    }
-                }));
+                globalWrite.setAll(getGlobalSubset(localbc.getAll()));
 
                 //Write Titan version
                 Preconditions.checkArgument(!globalWrite.has(INITIAL_TITAN_VERSION),"Database has already been initialized but not frozen");
-                globalWrite.set(INITIAL_TITAN_VERSION,TitanConstants.VERSION);
+                globalWrite.set(INITIAL_TITAN_VERSION, normVersion(TitanConstants.VERSION));
 
                 // If partitioning is unspecified, specify it now
                 if (!localbc.has(CLUSTER_PARTITION)) {
                     boolean part = storeFeatures.isDistributed() && storeFeatures.isKeyOrdered();
                     globalWrite.set(CLUSTER_PARTITION, part);
-                    log.info("Enabled partitioning", part);
+                    log.info("Set {}={} from store features", ConfigElement.getPath(CLUSTER_PARTITION), part);
                 } else {
-                    log.info("Disabled partitioning");
+                    log.info("Set {}={} from local config", ConfigElement.getPath(CLUSTER_PARTITION), globalWrite.get(CLUSTER_PARTITION));
+                    Preconditions.checkState(globalWrite.get(CLUSTER_PARTITION).equals(localbc.get(CLUSTER_PARTITION)));
                 }
 
                 /* If the configuration does not explicitly set a timestamp provider and
@@ -1264,8 +1325,63 @@ public class GraphDatabaseConfiguration {
             } else {
                 String version = globalWrite.get(INITIAL_TITAN_VERSION);
                 Preconditions.checkArgument(version!=null,"Titan version has not been initialized");
-                if (!TitanConstants.VERSION.equals(version) && !TitanConstants.COMPATIBLE_VERSIONS.contains(version)) {
-                    throw new TitanException("StorageBackend version is incompatible with current Titan version: " + version + " vs. " + TitanConstants.VERSION);
+
+                version = normVersion(version);
+
+                if (!normVersion(TitanConstants.VERSION).equals(version) &&
+                        !TitanConstants.COMPATIBLE_VERSIONS.contains(version)) {
+                    throw new TitanException("StorageBackend version " + version + " is incompatible with current Titan version: " + TitanConstants.VERSION + 
+                        ", compatible versions are: " + Joiner.on(", ").join(TitanConstants.COMPATIBLE_VERSIONS));
+                }
+
+                final boolean managedOverridesAllowed;
+
+                if (localbc.has(ALLOW_STALE_CONFIG))
+                    managedOverridesAllowed = localbc.get(ALLOW_STALE_CONFIG);
+                else if (globalWrite.has(ALLOW_STALE_CONFIG))
+                    managedOverridesAllowed = globalWrite.get(ALLOW_STALE_CONFIG);
+                else
+                    managedOverridesAllowed = ALLOW_STALE_CONFIG.getDefaultValue();
+
+                // Check for disagreement between local and backend values for GLOBAL(_OFFLINE) and FIXED options
+                // The point of this check is to find edits to the local config which have no effect (and therefore likely indicate misconfiguration)
+                Set<String> optionsWithDiscrepancies = Sets.newHashSet();
+                for (Map.Entry<ConfigElement.PathIdentifier, Object> ent : getManagedSubset(localbc.getAll()).entrySet()) {
+                    ConfigElement.PathIdentifier pid = ent.getKey();
+                    assert pid.element.isOption();
+                    ConfigOption<?> opt = (ConfigOption<?>)pid.element;
+                    Object localValue = ent.getValue();
+
+                    // Get the storage backend's setting and compare with localValue
+                    Object storeValue = globalWrite.get(opt, pid.umbrellaElements);
+
+                    // Most validation predicate impls disallow null, but we can't assume that here
+                    final boolean match;
+                    if (null != localValue && null != storeValue) {
+                        match = localValue.equals(storeValue);
+                    } else if (null == localValue && null == storeValue) {
+                        match = true;
+                    } else {
+                        match = false;
+                    }
+
+                    // Log each option with value disagreement between local and backend configs
+                    if (!match) {
+                        String fullOptionName = ConfigElement.getPath(pid.element, pid.umbrellaElements);
+                        String template = "Local setting {}={} (Type: {}) is overridden by globally managed value ({}).  Use the {} interface instead of the local configuration to control this setting.";
+                        Object replacements[] = new Object[] { fullOptionName, localValue, opt.getType(), storeValue, ManagementSystem.class.getSimpleName() };
+                        if (managedOverridesAllowed) { // Lower log severity when this is enabled
+                            log.warn(template, replacements);
+                        } else {
+                            log.error(template, replacements);
+                        }
+                        optionsWithDiscrepancies.add(fullOptionName);
+                    }
+                }
+
+                if (0 < optionsWithDiscrepancies.size() && !managedOverridesAllowed) {
+                    String template = "Local settings present for one or more globally managed options: [%s].  These options are controlled through the %s interface; local settings have no effect.";
+                    throw new TitanConfigurationException(String.format(template, Joiner.on(", ").join(optionsWithDiscrepancies), ManagementSystem.class.getSimpleName()));
                 }
             }
 
@@ -1304,6 +1420,38 @@ public class GraphDatabaseConfiguration {
 
         this.configuration = new MergedConfiguration(overwrite,combinedConfig);
         preLoadConfiguration();
+    }
+
+    private String normVersion(String ver){
+        String version = ver;
+        // split any postfixes
+        if (version != null){
+            String[] s = version.split("\\-");
+            if (s.length > 0){
+                version = s[0];
+            }
+        }
+        return version;
+    }
+
+    private static Map<ConfigElement.PathIdentifier, Object> getGlobalSubset(Map<ConfigElement.PathIdentifier, Object> m) {
+        return Maps.filterEntries(m, new Predicate<Map.Entry<ConfigElement.PathIdentifier, Object>>() {
+            @Override
+            public boolean apply(@Nullable Map.Entry<ConfigElement.PathIdentifier, Object> entry) {
+                assert entry.getKey().element.isOption();
+                return ((ConfigOption)entry.getKey().element).isGlobal();
+            }
+        });
+    }
+
+    private static Map<ConfigElement.PathIdentifier, Object> getManagedSubset(Map<ConfigElement.PathIdentifier, Object> m) {
+        return Maps.filterEntries(m, new Predicate<Map.Entry<ConfigElement.PathIdentifier, Object>>() {
+            @Override
+            public boolean apply(@Nullable Map.Entry<ConfigElement.PathIdentifier, Object> entry) {
+                assert entry.getKey().element.isOption();
+                return ((ConfigOption)entry.getKey().element).isManaged();
+            }
+        });
     }
 
     private static final AtomicLong INSTANCE_COUNTER = new AtomicLong(0);
@@ -1381,6 +1529,7 @@ public class GraphDatabaseConfiguration {
         if (configuration.has(PROPERTY_PREFETCHING))
             propertyPrefetching = configuration.get(PROPERTY_PREFETCHING);
         else propertyPrefetching = null;
+        adjustQueryLimit = configuration.get(ADJUST_LIMIT);
         allowVertexIdSetting = configuration.get(ALLOW_SETTING_VERTEX_ID);
         logTransactions = configuration.get(SYSTEM_LOG_TRANSACTIONS);
 
@@ -1494,6 +1643,10 @@ public class GraphDatabaseConfiguration {
         return txDirtyVertexSize;
     }
 
+    public boolean isClusterPartitioned() {
+        return configuration.get(CLUSTER_PARTITION);
+    }
+
     public boolean isBatchLoading() {
         return batchLoading;
     }
@@ -1528,6 +1681,10 @@ public class GraphDatabaseConfiguration {
         } else {
             return propertyPrefetching;
         }
+    }
+
+    public boolean adjustQueryLimit() {
+        return adjustQueryLimit;
     }
 
     public String getUnknownIndexKeyName() {
@@ -1600,6 +1757,10 @@ public class GraphDatabaseConfiguration {
         }
     }
 
+    public Configuration getConfiguration() {
+        return configuration;
+    }
+
     public Backend getBackend() {
         Backend backend = new Backend(configuration);
         backend.initialize(configuration);
@@ -1618,7 +1779,9 @@ public class GraphDatabaseConfiguration {
 
 
     public static Serializer getSerializer(Configuration configuration) {
-        Serializer serializer = new StandardSerializer(configuration.get(ATTRIBUTE_ALLOW_ALL_SERIALIZABLE));
+        Serializer serializer = new StandardSerializer(
+                configuration.get(ATTRIBUTE_ALLOW_ALL_SERIALIZABLE),
+                configuration.get(KRYO_INSTANCE_CACHE));
         for (RegisteredAttributeClass<?> clazz : getRegisteredAttributeClasses(configuration)) {
             clazz.registerWith(serializer);
         }

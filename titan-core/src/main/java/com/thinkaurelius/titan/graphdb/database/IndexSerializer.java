@@ -5,9 +5,12 @@ import com.google.common.base.Preconditions;
 import com.google.common.collect.*;
 import com.thinkaurelius.titan.core.*;
 import com.thinkaurelius.titan.core.Cardinality;
+import com.thinkaurelius.titan.core.schema.Parameter;
 import com.thinkaurelius.titan.core.schema.SchemaStatus;
+import com.thinkaurelius.titan.diskstorage.configuration.Configuration;
 import com.thinkaurelius.titan.graphdb.idmanagement.IDManager;
 import com.thinkaurelius.titan.graphdb.query.graph.GraphCentricQueryBuilder;
+import com.thinkaurelius.titan.graphdb.query.graph.MultiKeySliceQuery;
 import com.thinkaurelius.titan.graphdb.types.ParameterType;
 import com.thinkaurelius.titan.diskstorage.*;
 import com.thinkaurelius.titan.diskstorage.indexing.*;
@@ -40,6 +43,8 @@ import javax.annotation.Nullable;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
+import static com.thinkaurelius.titan.graphdb.configuration.GraphDatabaseConfiguration.INDEX_NAME_MAPPING;
+
 /**
  * @author Matthias Broecheler (me@matthiasb.com)
  */
@@ -52,13 +57,15 @@ public class IndexSerializer {
     private static final byte FIRST_INDEX_COLUMN_BYTE = 0;
 
     private final Serializer serializer;
+    private final Configuration configuration;
     private final Map<String, ? extends IndexInformation> mixedIndexes;
 
     private final boolean hashKeys;
     private final HashingUtil.HashLength hashLength = HashingUtil.HashLength.SHORT;
 
-    public IndexSerializer(Serializer serializer, Map<String, ? extends IndexInformation> indexes, final boolean hashKeys) {
+    public IndexSerializer(Configuration config, Serializer serializer, Map<String, ? extends IndexInformation> indexes, final boolean hashKeys) {
         this.serializer = serializer;
+        this.configuration = config;
         this.mixedIndexes = indexes;
         this.hashKeys=hashKeys;
         if (hashKeys) log.info("Hashing index keys");
@@ -71,6 +78,14 @@ public class IndexSerializer {
 
     public boolean containsIndex(final String indexName) {
         return mixedIndexes.containsKey(indexName);
+    }
+
+    public String getDefaultFieldName(final PropertyKey key, final Parameter[] parameters, final String indexName) {
+        Preconditions.checkArgument(!ParameterType.MAPPED_NAME.hasParameter(parameters),"A field name mapping has been specified for key: %s",key);
+        Preconditions.checkArgument(containsIndex(indexName),"Unknown backing index: %s",indexName);
+        String fieldname = configuration.get(INDEX_NAME_MAPPING,indexName)?key.getName():keyID2Name(key);
+        return mixedIndexes.get(indexName).mapKey2Field(fieldname,
+                new StandardKeyInformation(key.getDataType(),parameters));
     }
 
     public static void register(final MixedIndexType index, final PropertyKey key, final BackendTransaction tx) throws BackendException {
@@ -491,23 +506,23 @@ public class IndexSerializer {
     public List<Object> query(final JointIndexQuery.Subquery query, final BackendTransaction tx) {
         IndexType index = query.getIndex();
         if (index.isCompositeIndex()) {
-            KeySliceQuery sq = query.getCompositeQuery();
-            EntryList r = tx.indexQuery(sq);
-            List<Object> results = new ArrayList<Object>(r.size());
-            for (java.util.Iterator<Entry> iterator = r.reuseIterator(); iterator.hasNext(); ) {
-                Entry entry = iterator.next();
-                ReadBuffer entryValue = entry.asReadBuffer();
-                entryValue.movePositionTo(entry.getValuePosition());
-                switch(index.getElement()) {
-                    case VERTEX:
-                        results.add(VariableLong.readPositive(entryValue));
-                        break;
-                    default:
-                        results.add(bytebuffer2RelationId(entryValue));
+            MultiKeySliceQuery sq = query.getCompositeQuery();
+            List<EntryList> rs = sq.execute(tx);
+            List<Object> results = new ArrayList<Object>(rs.get(0).size());
+            for (EntryList r : rs) {
+                for (java.util.Iterator<Entry> iterator = r.reuseIterator(); iterator.hasNext(); ) {
+                    Entry entry = iterator.next();
+                    ReadBuffer entryValue = entry.asReadBuffer();
+                    entryValue.movePositionTo(entry.getValuePosition());
+                    switch(index.getElement()) {
+                        case VERTEX:
+                            results.add(VariableLong.readPositive(entryValue));
+                            break;
+                        default:
+                            results.add(bytebuffer2RelationId(entryValue));
+                    }
                 }
             }
-            boolean hasCardinalitySize = ((CompositeIndexType)index).getCardinality()!= Cardinality.SINGLE || results.size() <= 1;
-            Preconditions.checkArgument(((CompositeIndexType)index).getCardinality()!=Cardinality.SINGLE || results.size() <= 1);
             return results;
         } else {
             List<String> r = tx.indexQuery(((MixedIndexType) index).getBackingIndexName(), query.getMixedQuery());
@@ -517,8 +532,12 @@ public class IndexSerializer {
         }
     }
 
-    public KeySliceQuery getQuery(final CompositeIndexType index, Object[] values) {
-        return new KeySliceQuery(getIndexKey(index,values), BufferUtil.zeroBuffer(1), BufferUtil.oneBuffer(1));
+    public MultiKeySliceQuery getQuery(final CompositeIndexType index, List<Object[]> values) {
+        List<KeySliceQuery> ksqs = new ArrayList<KeySliceQuery>(values.size());
+        for (Object[] value : values) {
+            ksqs.add(new KeySliceQuery(getIndexKey(index,value), BufferUtil.zeroBuffer(1), BufferUtil.oneBuffer(1)));
+        }
+        return new MultiKeySliceQuery(ksqs);
     }
 
     public IndexQuery getQuery(final MixedIndexType index, final Condition condition, final OrderList orders) {
@@ -672,7 +691,11 @@ public class IndexSerializer {
 
     private static final String key2Field(ParameterIndexField field) {
         assert field!=null;
-        return ParameterType.MAPPED_NAME.findParameter(field.getParameters(),longID2Name(field.getFieldKey().getLongId()));
+        return ParameterType.MAPPED_NAME.findParameter(field.getParameters(),keyID2Name(field.getFieldKey()));
+    }
+
+    private static final String keyID2Name(PropertyKey key) {
+        return longID2Name(key.getLongId());
     }
 
     private static final String longID2Name(long id) {

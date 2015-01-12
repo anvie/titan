@@ -21,6 +21,14 @@ public class TitanHadoopConfiguration {
     public static final ConfigNamespace TRUNK_NS =
             new ConfigNamespace(new ConfigNamespace(ROOT_NS, "titan", "titan-hadoop namespace"), "hadoop", "Titan-Hadoop configuration parent");
 
+    public static final ConfigNamespace MAPRED_NS =
+            new ConfigNamespace(TRUNK_NS, "mr", "MapReduce configuration aspects that cut across input and output");
+
+    public static final ConfigOption<String> CLASSPATH_CONFIGURER = new ConfigOption<String>(
+            MAPRED_NS, "classpath-configurer",
+            "The full package and classname of a JobClasspathConfigurer implementation.",
+            ConfigOption.Type.LOCAL, String.class);
+
     public static final ConfigNamespace INPUT_NS =
             new ConfigNamespace(TRUNK_NS, "input", "Graph input format configuration");
 
@@ -77,6 +85,16 @@ public class TitanHadoopConfiguration {
             "Whether to attempt to automatically create Titan property keys and labels before writing data",
             ConfigOption.Type.LOCAL, true);
 
+    public static final ConfigOption<Boolean> OUTPUT_TITAN_TYPE_CHECKING = new ConfigOption<Boolean>(
+            OUTPUT_NS, "titan-type-checking",
+            "Attempt to load and enforce Titan schema information as early as possible in the job pipeline, " +
+            "typically in the first mapper that executes as part of a Titan-Hadoop pipeline.  This option is only " +
+            "useful when reading ungroomed data from an input source that does not provide intrinsic integrity " +
+            "guarantees, such as RDF or GraphSON files, and writing those same data out to Titan.  This option is " +
+            "meaningless and must be false or unspecified when either the output format is not a Titan output " +
+            "format or when the input format is a Titan input format (or both).",
+            ConfigOption.Type.LOCAL, false);
+
     public static final ConfigOption<String> OUTPUT_LOADER_SCRIPT_FILE = new ConfigOption<String>(
             OUTPUT_NS, "loader-script-file",
             "The path to a Titan vertex/edge/property loader script.  This option only has an effect when " +
@@ -98,6 +116,16 @@ public class TitanHadoopConfiguration {
 
     public static final ConfigNamespace OUTPUT_CONF_NS =
             new ConfigNamespace(OUTPUT_NS, "conf", "Settings for the output format class");
+
+    public static final ConfigOption<String> FINAL_OUTPUT_LOCATION = new ConfigOption<String>(
+            OUTPUT_NS, "location",
+            "Titan-Hadoop writes the output of each Hadoop job to a subdirectory named job-<N> for N=0,1,...(N-1) in " +
+            ConfigElement.getPath(JOBDIR_LOCATION) + " by default.  However, when this option is set, the output " +
+            "of the final job (N-1) in a Titan-Hadoop pipeline will instead be written to the name directory.  " +
+            "This option works by calling SequenceFileOutputFormat.setOutputPath, so it generally only applies " +
+            "to output formats which are descendants of FileOutputFormat.  In particular, this option has no effect " +
+            "on output formats that write to a Titan graph.",
+            ConfigOption.Type.LOCAL, String.class);
 
     public static final ConfigNamespace PIPELINE_NS =
             new ConfigNamespace(TRUNK_NS, "pipeline", "MapReduce job cascading configuration");
