@@ -3,7 +3,7 @@
     <parent>
         <groupId>com.thinkaurelius.titan</groupId>
         <artifactId>titan</artifactId>
-        <version>0.5.4-digaku-SNAPSHOT</version>
+        <version>0.5.5-digaku-SNAPSHOT</version>
         <relativePath>../pom.xml</relativePath>
     </parent>
     <artifactId>titan-core</artifactId>
@@ -121,6 +121,7 @@
             <groupId>com.esotericsoftware.kryo</groupId>
             <artifactId>kryo</artifactId>
             <version>2.22</version>
+            <optional>true</optional>
             <!--<classifier>shaded</classifier>-->
             
             <!--
@@ -214,6 +215,64 @@
                     </execution>
                 </executions>
             </plugin>
+            <plugin>
+                <artifactId>maven-shade-plugin</artifactId>
+                <version>2.3</version>
+                <executions>
+                    <execution>
+                        <id>shade-gremlin-groovy</id>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <artifactSet>
+                                <includes>
+                                    <!-- As of Kryo 2.22, this artifact includes both minlog and reflectasm -->
+                                    <!-- If we upgrade to later a Kryo version, we may have to add includes
+                                         for minlog and reflectasm (this is true of 2.24.0, not sure about 3) -->
+                                    <include>com.esotericsoftware.kryo:*</include>
+                                </includes>
+                            </artifactSet>
+                            <filters>
+                                <filter>
+                                    <artifact>*:*</artifact>
+                                    <excludes>
+                                        <exclude>reflectasm-1.07-shaded.jar</exclude>
+                                        <exclude>minlog-1.2.jar</exclude>
+                                        <exclude>objenesis-1.2.jar</exclude>
+                                        <exclude>META-INF/MANIFEST.MF</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
+                            <relocations>
+                                <relocation>
+                                    <pattern>com.esotericsoftware.kryo</pattern>
+                                    <shadedPattern>com.thinkaurelius.shaded.kryo_2_22</shadedPattern>
+                                </relocation>
+                                <relocation>
+                                    <pattern>com.esotericsoftware.minlog</pattern>
+                                    <shadedPattern>com.thinkaurelius.shaded.minlog_1_2</shadedPattern>
+                                </relocation>
+                                <relocation>
+                                    <pattern>com.esotericsoftware.reflectasm</pattern>
+                                    <shadedPattern>com.thinkaurelius.shaded.reflectasm_1_07</shadedPattern>
+                                </relocation>
+                                <relocation>
+                                    <pattern>com.esotericsoftware.shaded.org.objenesis</pattern>
+                                    <shadedPattern>com.thinkaurelius.shaded.objenesis_1_2</shadedPattern>
+                                </relocation>
+                            </relocations>
+                            <!-- false below means the shade plugin overwrites the main project artifact (the one with no classifier).
+                                 false does *not* actually detach the main artifact, despite what the option name suggests. -->
+                            <shadedArtifactAttached>false</shadedArtifactAttached>
+                            <minimizeJar>false</minimizeJar>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+
         </plugins>
     </build>
 </project>
