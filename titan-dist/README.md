@@ -78,3 +78,9 @@ command on the local system.  This is no longer required now that the
 docs have moved from the GitHub wiki to AsciiDoc files stored in the
 repo.  The AsciiDoc files are converted to HTML using a DocBook-based
 toolchain completely managed by maven.
+
+To Deploy
+------------
+
+    $ mvn -DskipTests=true clean package deploy
+    
